@@ -1,0 +1,68 @@
+{
+  "name": "lower-thirds-engine",
+  "version": "1.0.0",
+  "description": "ProPresenter 7 broadcast lower-thirds / graphics engine for OBS & ATEM — desktop app with auto-update.",
+  "author": "Brandon <brandon@colegacy.co.site>",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/run-all.js",
+    "relay": "node relay.js",
+    "check": "node -e \"const fs=require('fs'),os=require('os'),p=require('path');const m=fs.readFileSync('lt.html','utf8').match(/<script\\b[^>]*>([\\s\\S]*)<\\/script>/i);if(!m){console.error('no <script> block');process.exit(1);}const f=p.join(os.tmpdir(),'_lt.js');fs.writeFileSync(f,m[1]);require('child_process').execSync('node --check '+f,{stdio:'inherit'});console.log('syntax OK')\"",
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "com.lowerthirds.engine",
+    "productName": "Lower Thirds Engine",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "files": [
+      "main.js",
+      "preload.js",
+      "relay.js",
+      "lt.html",
+      "build/icon.*",
+      "!test/**",
+      "!**/*.md",
+      "!.github/**"
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "win": {
+      "target": [ "nsis" ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lower Thirds Engine"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "mrlegacy29",
+        "repo": "lower-thirds-engine",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "42.4.0",
+    "electron-builder": "26.15.2",
+    "jsdom": "29.1.1"
+  },
+  "dependencies": {
+    "electron-log": "5.4.4",
+    "electron-updater": "6.8.3"
+  }
+}

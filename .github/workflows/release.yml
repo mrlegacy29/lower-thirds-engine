@@ -1,0 +1,34 @@
+name: Release
+
+# Push a version tag (e.g. v1.0.1) and this builds the Windows installer and
+# publishes a GitHub Release. Running copies of the app then see the update.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed to create the GitHub Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"   # electron-builder 26 requires Node >= 22.12
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build & publish (electron-builder)
+        run: npx --no-install electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
