@@ -958,8 +958,13 @@ function makeElRenderer(){
       ul.querySelectorAll(".mk").forEach(m=>{m.style.color=(st.item&&st.item.color)||"#fff";});
     } else if(t==="history"||t==="eventList"){
       const lab=content.querySelector(".h-label");
-      lab.textContent=d.content.heading||""; lab.style.display=d.content.heading?"block":"none"; typeCss(lab,st.heading);
-      renderHistChips(d,(data&&data.items)||[]);
+      const items=(data&&data.items)||[];
+      lab.textContent=d.content.heading||"";
+      // Hide the heading when the list is empty/cleared so there's no floating label on air.
+      // In the interactive builder, keep it visible so the element stays selectable/positionable.
+      lab.style.display=(d.content.heading && d.showHeading!==false && (items.length>0 || interactive))?"block":"none";
+      typeCss(lab,st.heading);
+      renderHistChips(d,items);
     } else if(t==="media"){
       const hint=content.querySelector(".media-hint");
       if(hint){ const empty=!(d.box&&d.box.mediaSrc);

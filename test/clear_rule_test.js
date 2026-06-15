@@ -28,6 +28,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const click = (n) => { if (!n) throw new Error('button not found'); n.dispatchEvent(new W.MouseEvent('click', { bubbles: true })); };
 const pgEl = (sel) => [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector(sel));
 const pgList = () => { const e = pgEl('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].map(t => t.textContent) : []; };
+const pgHeadingShown = () => { const w = [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector('.h-label')); const h = w && w.querySelector('.h-label'); return !!h && h.style.display !== 'none'; };
 const btnByText = (re) => [...D.querySelectorAll('button')].find(b => re.test(b.textContent));
 const ALL_OFF = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
 let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL**') + '  ' + n); c ? pass++ : fail++; };
@@ -57,6 +58,7 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   ok('verse logs while live', pgList().includes('John 3:16'));
   slideText = 'Romans 8:28\nAnd we know.'; await sleep(400);
   ok('second verse logs', pgList().includes('Romans 8:28'));
+  ok('heading shown while the list has items', pgHeadingShown());
 
   // F2 (Clear Slide): slide off, EVERY layer off (slides-only), but presentation STILL active -> list STAYS
   slideText = ''; slideActive = false; presPop = true; layersObj = Object.assign({}, ALL_OFF); await sleep(400);
@@ -65,6 +67,7 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   // Clear All: presentation cleared -> list CLEARS (same layer state as F2 above)
   presPop = false; await sleep(700);   // allow the list exit animation (~450ms) to finish
   ok('pres rule: Clear All (presentation cleared) WIPES the list', pgList().length === 0);
+  ok('heading hides when the list is cleared (no floating label on air)', !pgHeadingShown());
 
   // ---- manual "Clear scripture list now" ----
   slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presPop = true; layersObj = { slide: true, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false }; await sleep(400);
