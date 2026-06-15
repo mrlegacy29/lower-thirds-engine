@@ -20,7 +20,7 @@
   "build": {
     "appId": "com.lowerthirds.engine",
     "productName": "Lower Thirds Engine",
-    "artifactName": "${productName}-Setup-${version}.${ext}",
+    "artifactName": "Lower-Thirds-Engine-Setup-${version}.${ext}",
     "files": [
       "main.js",
       "preload.js",
