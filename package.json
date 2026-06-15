@@ -1,6 +1,6 @@
 {
   "name": "lower-thirds-engine",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "ProPresenter 7 broadcast lower-thirds / graphics engine for OBS & ATEM — desktop app with auto-update.",
   "author": "Brandon <brandon@colegacy.co.site>",
   "license": "UNLICENSED",
@@ -36,7 +36,9 @@
       "buildResources": "build"
     },
     "win": {
-      "target": [ "nsis" ],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.ico"
     },
     "nsis": {
