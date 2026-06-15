@@ -572,7 +572,7 @@ function createElement(type){
 
 function defaultConfig(){
   return {
-    conn:{host:"",port:1025,pollMs:200},
+    conn:{host:"",port:1025,pollMs:200,clearRule:"all",clearLayer:"media"},
     out:{bg:"transparent",safe:false},
     elements:[ createElement("scripture"), createElement("history") ]
   };
@@ -695,12 +695,34 @@ function allLayersClear(layers){
   if(!any) return null;        // shape not understood
   return !active;              // true = all visual layers off = Clear All
 }
+// Normalize ProPresenter's layer status into a flat {layerName: bool} map
+// (handles the flat-object shape and array/data-wrapped variants).
+function normLayers(layers){
+  if(layers==null) return null;
+  if(layers.data!==undefined) return normLayers(layers.data);
+  const out={};
+  if(Array.isArray(layers)){ layers.forEach(x=>{ const nm=(x.name||x.id||x.layer||"").toString().toLowerCase(); if(nm){ const on=layerOn(x); if(on!==null) out[nm]=on; } }); }
+  else if(typeof layers==="object"){ for(const k in layers){ const on=layerOn(layers[k]); if(on!==null) out[k.toLowerCase()]=on; } }
+  return out;
+}
+// Decide whether a clear event should wipe the scripture reference list, per the
+// operator's chosen rule. Evaluated only while the slide is in a cleared state.
+function isFullClear(rule, layer, signals){
+  if(!signals) return false;
+  switch(rule){
+    case "manual": return false;
+    case "pres":   return signals.presPopulated===false;          // ProPresenter cleared the active presentation (Clear All)
+    case "layer":  { const m=signals.layers||{}; return m[layer]===false; }  // the chosen distinguishing layer went off
+    case "all":
+    default:       return signals.allOff===true;                  // every visual layer off
+  }
+}
 function createPP(opts){
-  let host,port,pollMs,timer=null,running=false,lastKey="",supportsLayers=true;
-  let lastActive=null,lastAllClr=null;
+  let host,port,pollMs,timer=null,running=false,lastKey="",lastSigKey="",supportsLayers=true;
+  let lastActive=null,lastAllClr=null,lastLayers=null,lastPres=null;
   async function tick(){
     if(!running)return;
-    let slideText="",active=null,allClr=null,slideOk=false;
+    let slideText="",active=null,allClr=null,slideOk=false,layersMap=lastLayers,presPop=lastPres;
     try{
       const r=await fetch(ppUrl(host,port,"/v1/status/slide"),{cache:"no-store"});
       if(r.ok){ const d=await r.json(); const dd=(d&&d.data&&(d.current||d.next)?d:(d.data||d));
@@ -715,21 +737,29 @@ function createPP(opts){
       try{ const lr=await fetch(ppUrl(host,port,"/v1/status/layers"),{cache:"no-store"});
         if(lr.ok){ const lj=await lr.json(); const a=slideLayerActive(lj);
           if(a===null){ supportsLayers=false; }                 // genuine: this build doesn't report layer status
-          else { active=a; allClr=allLayersClear(lj); lastActive=active; lastAllClr=allClr; layerOkThisTick=true; } }
+          else { active=a; allClr=allLayersClear(lj); layersMap=normLayers(lj); lastActive=active; lastAllClr=allClr; lastLayers=layersMap; layerOkThisTick=true; } }
         // a non-ok layers status is transient — do NOT latch supportsLayers off
       }catch(e){ /* transient layers failure — do NOT latch off; retry next tick */ }
       // on a transient layers miss, reuse the last good reading instead of flapping
-      if(supportsLayers && !layerOkThisTick){ active=lastActive; allClr=lastAllClr; }
+      if(supportsLayers && !layerOkThisTick){ active=lastActive; allClr=lastAllClr; layersMap=lastLayers; }
     }
+    // presentation/slide_index distinguishes Clear All (presentation cleared -> null) from
+    // Clear Slide (often leaves the presentation focused -> populated). Hold last on a blip.
+    try{ const pr=await fetch(ppUrl(host,port,"/v1/presentation/slide_index"),{cache:"no-store"});
+      if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation_index!=null); lastPres=presPop; }
+    }catch(e){ /* transient — hold last */ }
     // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
     const cleared = (active===false) || (active===null && !slideText.trim());
     const clearAll = (allClr===true);
-    const key=(cleared?"__CLEAR__":slideText)+"|"+active+"|"+clearAll;
-    if(key!==lastKey){ lastKey=key; opts.onUpdate(cleared?"":slideText, active, clearAll); }
+    const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll };
+    const sigKey = active+"|"+presPop+"|"+JSON.stringify(layersMap||0);
+    if(sigKey!==lastSigKey){ lastSigKey=sigKey; opts.onSignals && opts.onSignals(signals); }
+    const key=(cleared?"__CLEAR__":slideText)+"|"+active+"|"+clearAll+"|"+presPop;
+    if(key!==lastKey){ lastKey=key; opts.onUpdate(cleared?"":slideText, active, clearAll, signals); }
     timer=setTimeout(tick,pollMs);
   }
   return {
-    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;lastKey="";lastActive=null;lastAllClr=null;tick(); },
+    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;lastKey="";lastSigKey="";lastActive=null;lastAllClr=null;lastLayers=null;lastPres=null;tick(); },
     stop(){ running=false; if(timer){clearTimeout(timer);timer=null;} },
     layersSupported(){return supportsLayers;}
   };
@@ -1247,14 +1277,17 @@ if(isOutput){
   const hashCfg=readHashCfg();
   let program = hashCfg ? deepMerge(defaultConfig(),hashCfg) : lsGet(LS_PROGRAM,defaultConfig());
   applyBg(document.body,program.out.bg); stage.setConfig(program);
-  let lastTake=program._take||0;
+  let lastTake=program._take||0, lastClearHist=program._clearHist||0;
 
   const history=[]; let histId=0;
   function histWantsClear(){ return (program&&program.elements||[]).some(e=>e&&e.type==="history"&&e.clearOnAll!==false); }
-  function onSlide(text,active,clearAll){
+  function onSlide(text,active,clearAll,signals){
     const sc=text?parseScripture(text):null;
-    if(clearAll && histWantsClear()){ history.length=0; stage.setHistory(history); }   // F1 wipes the ref list
-    if(!text){ stage.setLive(null); return; }                  // clear: hide live verse; list stays as-is
+    const cn=(program&&program.conn)||{};
+    if(!text){
+      if(histWantsClear() && isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals)){ history.length=0; stage.setHistory(history); }  // wipe the ref list only on a full clear, per the operator's rule
+      stage.setLive(null); return;                             // hide live verse; list stays unless the rule fired
+    }
     if(sc){ stage.setLive(sc); if(sc.ref)pushHist(sc.ref); }    // set live first, then log (clean exclude-live)
     else { stage.setLive({ref:"",body:text.trim(),translation:"",rawText:text.trim()}); } // non-scripture slide
   }
@@ -1269,6 +1302,7 @@ if(isOutput){
     const connChanged=JSON.stringify(merged.conn)!==JSON.stringify(program.conn);
     program=merged; applyBg(document.body,program.out.bg); stage.setConfig(program); stage.setHistory(history);
     if(connChanged){ pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
+    if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; stage.setHistory(history); }  // manual "Clear list" from the console
     if(merged._take && merged._take!==lastTake){ lastTake=merged._take; stage.replayVisible(); }
   });
   // storage event (same browser, other tab)
@@ -1276,6 +1310,7 @@ if(isOutput){
     const cc=JSON.stringify(c.conn)!==JSON.stringify(program.conn); program=deepMerge(defaultConfig(),c);
     applyBg(document.body,program.out.bg); stage.setConfig(program); stage.setHistory(history);
     if(cc){pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);}
+    if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; stage.setHistory(history); }
     if(c._take && c._take!==lastTake){ lastTake=c._take; stage.replayVisible(); } }catch(err){} } });
 
   const ro=new ResizeObserver(()=>fitScaler(scaler,rootStage)); ro.observe(rootStage); fitScaler(scaler,rootStage);
@@ -1321,6 +1356,17 @@ if(!isOutput){
   function pushLog(ref){ if(!ref)return; const last=liveLog[liveLog.length-1]; if(last&&last.ref===ref)return;
     liveLog.push({id:++logId,ref}); pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
   function clearLog(){ liveLog.length=0; pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
+  // manual "Clear list now" — clears the console log AND tells the OBS output to clear (nonce on the published config)
+  let _clearNonce=0;
+  function manualClearList(){ clearLog(); _clearNonce=Math.max(Date.now(),_clearNonce+1); const c=clone(program); c._clearHist=_clearNonce; bus.publish(c); }
+  // live readout of the clear-detection signals (layer states + presentation status) for the Clear Behavior panel
+  let _lastSignals=null;
+  function renderClearDiag(s){ if(s)_lastSignals=s; const box=$("clearDiag"); if(!box||!_lastSignals)return;
+    const m=_lastSignals.layers||{};
+    const chip=(n)=>{ const on=m[n]===true; return '<span style="display:inline-block;padding:2px 7px;margin:2px;border-radius:6px;font-family:var(--mono,monospace);font-size:11px;'+(on?'color:#06210f;background:#48e08a;font-weight:700':'color:var(--muted,#8aa);background:rgba(255,255,255,.05)')+'">'+n+'</span>'; };
+    const names=["slide","media","props","messages","announcements","audio","video_input"];
+    const pres=_lastSignals.presPopulated===true?"Active":_lastSignals.presPopulated===false?"Cleared":"—";
+    box.innerHTML=names.map(chip).join("")+'<div style="margin-top:5px;font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)">presentation: <b style="color:var(--ink,#eef)">'+pres+'</b></div>'; }
   const pvMonTally={el:document.querySelector(".montitle.pv")};
   function setTally(t,on){ if(t&&t.el)t.el.classList.toggle("on",on); }
 
@@ -1336,7 +1382,7 @@ if(!isOutput){
 
   /* ---- console PP client: live feed is the ONLY thing that logs scripture refs ---- */
   function historyWantsClear(cfg){ return (cfg&&cfg.elements||[]).some(e=>e&&e.type==="history"&&e.clearOnAll!==false); }
-  function onSlide(text,active,clearAll){
+  function onSlide(text,active,clearAll,signals){
     const sc=text?parseScripture(text):null;
     let liveData=null;
     if(!text){ liveData=null; }                                  // clear: hide live verse; log untouched
@@ -1345,14 +1391,16 @@ if(!isOutput){
     pgStage.setLive(liveData); setTally({el:$("pgTitle")}, !!liveData);
     if(liveMode){ pvStage.setLive(liveData); setTally(pvMonTally,!!liveData); }
     if(sc&&sc.ref)pushLog(sc.ref);                               // log AFTER setLive (clean exclude-live)
-    if(clearAll && historyWantsClear(program)) clearLog();        // F1 (Clear All) wipes the Scripture ref list
+    // clear the ref list only while the slide is cleared AND the operator's clear-rule calls it a full clear
+    const _cn=preview.conn||{};
+    if(!text && historyWantsClear(program) && isFullClear(_cn.clearRule||"all",_cn.clearLayer||"media",signals)) clearLog();
     $("stSlide")&&($("stSlide").textContent=text?(text.length>42?text.slice(0,42)+"\u2026":text):"(clear)");
     $("stLayer")&&($("stLayer").textContent=active===null?"n/a (text mode)":active?"slide ON":"slide CLEAR");
     const on=(active===null)?!!text:!!active;
     $("opSlideTxt")&&($("opSlideTxt").textContent=text?(text.length>34?text.slice(0,34)+"\u2026":text):"(clear)");
     const air=$("opAir"); if(air){ air.classList.toggle("live",on); const at=$("opAirTxt"); if(at)at.textContent=on?"ON AIR":"STANDBY"; }
   }
-  const pp=createPP({onUpdate:onSlide,
+  const pp=createPP({onUpdate:onSlide, onSignals:(s)=>renderClearDiag(s),
     onReach:(ok)=>{ const dot=$("connDot"); if(dot)dot.className="dot "+(ok?"ok":"err");
       $("stStatus")&&($("stStatus").textContent=ok?"Connected":"No response");
       const od=$("opConnDot"); if(od)od.className="ops-dot "+(ok?"ok":"err");
@@ -1837,7 +1885,19 @@ if(!isOutput){
         statLine("Status","stStatus","Not connected"),
         statLine("Slide","stSlide","\u2014"),
         statLine("Clear detect","stLayer","\u2014")]),
-      el("p",{class:"hint",html:"<b>Clear detect</b> reads ProPresenter's slide layer so F1/F2/clear actually hides the graphic. If it shows <i>n/a (text mode)</i>, your build didn't return layer status \u2014 it falls back to empty-text detection."})
+      el("p",{class:"hint",html:"<b>Clear detect</b> reads ProPresenter's slide layer so F1/F2/clear actually hides the graphic. If it shows <i>n/a (text mode)</i>, your build didn't return layer status \u2014 it falls back to empty-text detection."}),
+      el("div",{class:"grp"},[el("div",{class:"gh",text:"Clear behavior \u2014 Previously-Referenced list"}),
+        el("p",{class:"hint",html:"Pick what makes the scripture ref list clear. Watch the live signals below while you press <b>Clear Slide (F2)</b> vs <b>Clear All</b> in ProPresenter, then choose the option that only fires on a full clear."}),
+        rowSeg("Clear the ref list when",cn.clearRule||"all",
+          [["pres","Clear All (presentation cleared)"],["all","All layers off"],["layer","A layer turns off"],["manual","Manual only"]],
+          (v)=>{cn.clearRule=v;savePreview();renderPanels();}),
+        (cn.clearRule==="layer")?rowSelect("\u2026when this layer turns off",cn.clearLayer||"media",
+          [["media","Media"],["props","Props"],["messages","Messages"],["announcements","Announcements"],["video_input","Video input"],["audio","Audio"]],
+          (v)=>{cn.clearLayer=v;savePreview();}):null,
+        el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"}),
+        el("div",{class:"row"},[el("button",{class:"btn sm full",text:"Clear scripture list now",onclick:()=>{manualClearList();}})]),
+        el("p",{class:"hint",html:"<b>Clear All (presentation cleared)</b> is the recommended fix so Clear Slide (F2) leaves the list up. Rule changes reach the OBS output after the next <b>Take</b>."})
+      ])
     ],false,"conn");
   }
   function statLine(label,id,val){ return el("div",{class:"row",style:"justify-content:space-between;font-family:var(--mono);font-size:12px;color:var(--muted)"},

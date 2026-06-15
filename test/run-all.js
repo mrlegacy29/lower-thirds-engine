@@ -14,7 +14,7 @@ console.log('syntax OK\n');
 
 const suites = ['final_check2','exclude_test2','sweep','evtest4',
                 'media_motion_test','motion_waapi_test','layer_dock_test','operator_test','custom_take_test',
-                'relay_test','output_test','pp_resilience_test'];
+                'relay_test','output_test','pp_resilience_test','clear_rule_test'];
 let failed = 0;
 for (const s of suites) {
   process.stdout.write(s.padEnd(20) + ' ');
