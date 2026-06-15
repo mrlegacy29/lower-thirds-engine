@@ -22,6 +22,8 @@ const PORT = 7777;
 let win = null;
 let relayServer = null;
 let updateState = { status: "idle" };   // idle|checking|current|available|downloading|ready|error
+let manualCheck = false;                 // true only for an explicit "Check for Updates" — gates whether a failed check shows a banner
+let updateTimer = null;                  // periodic background update check (every 5 min while running)
 
 /* ----- single instance: don't double-bind the relay port ----- */
 const gotLock = app.requestSingleInstanceLock();
@@ -51,9 +53,11 @@ function boot() {
     createWindow();
     buildMenu();
     setupUpdater();
-    // check for updates shortly after launch (packaged builds only)
+    // check for updates shortly after launch, then every 5 minutes while running
+    // (packaged builds only). Both are background checks, so a failed check stays quiet.
     if (app.isPackaged && autoUpdater) {
-      setTimeout(() => { try { autoUpdater.checkForUpdates(); } catch (e) {} }, 3500);
+      setTimeout(() => { manualCheck = false; try { autoUpdater.checkForUpdates(); } catch (e) {} }, 3500);
+      updateTimer = setInterval(() => { manualCheck = false; try { autoUpdater.checkForUpdates(); } catch (e) {} }, 5 * 60 * 1000);
     }
   });
 
@@ -115,11 +119,12 @@ function setupUpdater() {
   autoUpdater.on("update-not-available", () => { updateState = { status: "current" }; pushUpdateState(); });
   autoUpdater.on("download-progress", (p) => { updateState = { status: "downloading", percent: Math.round(p.percent || 0) }; pushUpdateState(); });
   autoUpdater.on("update-downloaded", (info) => { updateState = { status: "ready", newVersion: info && info.version }; pushUpdateState(); });
-  autoUpdater.on("error", (err) => { updateState = { status: "error", message: String(err && err.message || err) }; pushUpdateState(); });
+  autoUpdater.on("error", (err) => { updateState = { status: "error", message: String(err && err.message || err), quiet: !manualCheck }; pushUpdateState(); });
 }
 
 /* ----- IPC from the renderer (preload) ----- */
 ipcMain.on("updater:check", () => {
+  manualCheck = true;   // explicit user check (menu / banner) — surface the result, including failures
   if (!autoUpdater) { updateState = { status: "error", message: "Updater not available in dev mode." }; pushUpdateState(); return; }
   try { autoUpdater.checkForUpdates(); } catch (e) { updateState = { status: "error", message: String(e && e.message || e) }; pushUpdateState(); }
 });

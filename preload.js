@@ -97,10 +97,10 @@ function render(s) {
     btnEl.style.display = "";
     show();
   } else if (s.status === "error") {
-    // keep this quiet/dismissible — a failed check shouldn't nag during service
+    if (s.quiet) { hide(); return; }   // background (launch/periodic) check — don't nag during a service
     bannerEl.dataset.key = "err"; if (dismissed === "err") return;
     bannerEl.classList.add("err");
-    textEl.innerHTML = "<b>Update check failed.</b> Will retry next launch.";
+    textEl.innerHTML = "<b>Update check failed.</b> Will retry shortly.";
     show();
     setTimeout(hide, 6000);
   } else {
