@@ -572,10 +572,17 @@ function createElement(type){
 
 function defaultConfig(){
   return {
-    conn:{host:"",port:1025,pollMs:200,clearRule:"all",clearLayer:"media"},
+    conn:{host:"",port:1025,pollMs:200,clearRule:"pres",clearLayer:"media"},
     out:{bg:"transparent",safe:false},
     elements:[ createElement("scripture"), createElement("history") ]
   };
+}
+// One-time migration: the original clear-detection default was "all" (all layers off), which can't
+// tell Clear Slide from Clear All in a slides-only service. Presentation-based detection ("pres")
+// is now preferred. Flip the OLD default once; an explicit operator choice sets _ruleMig and sticks.
+function migrateClearRule(cfg){
+  if(cfg&&cfg.conn&&cfg.conn.clearRule==="all"&&!cfg.conn._ruleMig){ cfg.conn.clearRule="pres"; cfg.conn._ruleMig=true; }
+  return cfg;
 }
 
 const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Sermon title",
@@ -743,10 +750,10 @@ function createPP(opts){
       // on a transient layers miss, reuse the last good reading instead of flapping
       if(supportsLayers && !layerOkThisTick){ active=lastActive; allClr=lastAllClr; layersMap=lastLayers; }
     }
-    // presentation/slide_index distinguishes Clear All (presentation cleared -> null) from
-    // Clear Slide (often leaves the presentation focused -> populated). Hold last on a blip.
-    try{ const pr=await fetch(ppUrl(host,port,"/v1/presentation/slide_index"),{cache:"no-store"});
-      if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation_index!=null); lastPres=presPop; }
+    // presentation/active distinguishes Clear All (presentation cleared -> null) from
+    // Clear Slide (slide hidden but the presentation stays active -> populated). Hold last on a blip.
+    try{ const pr=await fetch(ppUrl(host,port,"/v1/presentation/active"),{cache:"no-store"});
+      if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation!=null); lastPres=presPop; }
     }catch(e){ /* transient — hold last */ }
     // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
     const cleared = (active===false) || (active===null && !slideText.trim());
@@ -962,7 +969,7 @@ function makeElRenderer(){
       lab.textContent=d.content.heading||"";
       // Hide the heading when the list is empty/cleared so there's no floating label on air.
       // In the interactive builder, keep it visible so the element stays selectable/positionable.
-      lab.style.display=(d.content.heading && d.showHeading!==false && (items.length>0 || interactive))?"block":"none";
+      lab.style.display=(d.content.heading && d.showHeading!==false && (items.length>0 || interactive || (data&&data.headerHold)))?"block":"none";
       typeCss(lab,st.heading);
       renderHistChips(d,items);
     } else if(t==="media"){
@@ -1139,7 +1146,7 @@ function createStage(scaler,opts){
       let items=history;
       if(d.excludeLive && live && live.ref){ items=history.slice();
         while(items.length && items[items.length-1].ref===live.ref) items.pop(); }
-      return {items};
+      return {items,headerHold};
     }
     if(d.type==="eventList"){ const lines=(d.content.items||"").split("\n").map(s=>s.trim()).filter(Boolean);
       return {items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
@@ -1218,6 +1225,8 @@ function createStage(scaler,opts){
   }
   function setLive(d){ live=d; renderAll(); }
   function setHistory(arr){ history=arr.slice(); renderAll(); }
+  let headerHold=false;   // keep the ref-list header visible even when the list is empty (set on a Clear-Slide / partial clear)
+  function setHeaderHold(v){ v=!!v; if(headerHold!==v){ headerHold=v; renderAll(); } }
   // Re-play entrance on visible content elements (used by TAKE so animation changes are visible).
   // Persistent / always-on elements (logos, watermarks) are intentionally skipped.
   function replayVisible(){
@@ -1258,7 +1267,7 @@ function createStage(scaler,opts){
   }
   function clampN(v,a,b){return Math.max(a,Math.min(b,v));}
 
-  return { setConfig,setLive,setHistory,select,setScale,replayVisible,
+  return { setConfig,setLive,setHistory,setHeaderHold,select,setScale,replayVisible,
     get cfg(){return cfg;}, getRenderer:(id)=>renderers.get(id) };
 }
 
@@ -1280,7 +1289,7 @@ if(isOutput){
   function readHashCfg(){ const m=(location.hash||"").match(/[#&]cfg=([^&]+)/); if(!m)return null;
     try{ return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); }catch(e){ return null; } }
   const hashCfg=readHashCfg();
-  let program = hashCfg ? deepMerge(defaultConfig(),hashCfg) : lsGet(LS_PROGRAM,defaultConfig());
+  let program = migrateClearRule(hashCfg ? deepMerge(defaultConfig(),hashCfg) : lsGet(LS_PROGRAM,defaultConfig()));
   applyBg(document.body,program.out.bg); stage.setConfig(program);
   let lastTake=program._take||0, lastClearHist=program._clearHist||0;
 
@@ -1290,9 +1299,12 @@ if(isOutput){
     const sc=text?parseScripture(text):null;
     const cn=(program&&program.conn)||{};
     if(!text){
-      if(histWantsClear() && isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals)){ history.length=0; stage.setHistory(history); }  // wipe the ref list only on a full clear, per the operator's rule
-      stage.setLive(null); return;                             // hide live verse; list stays unless the rule fired
+      const full=isFullClear(cn.clearRule||"pres", cn.clearLayer||"media", signals);
+      if(histWantsClear()){ history.length=0; stage.setHistory(history); }   // list clears on any clear (Clear Slide or Clear All)
+      stage.setHeaderHold(!full);                              // keep the header on a Clear Slide; hide it on a Clear All
+      stage.setLive(null); return;
     }
+    stage.setHeaderHold(true);
     if(sc){ stage.setLive(sc); if(sc.ref)pushHist(sc.ref); }    // set live first, then log (clean exclude-live)
     else { stage.setLive({ref:"",body:text.trim(),translation:"",rawText:text.trim()}); } // non-scripture slide
   }
@@ -1323,8 +1335,9 @@ if(isOutput){
 
 /* ============================================================= CONSOLE BOOTSTRAP */
 if(!isOutput){
-  let preview=lsGet(LS_PREVIEW,defaultConfig());
-  let program=lsGet(LS_PROGRAM, clone(preview));
+  let preview=migrateClearRule(lsGet(LS_PREVIEW,defaultConfig()));
+  let program=migrateClearRule(lsGet(LS_PROGRAM, clone(preview)));
+  lsSet(LS_PREVIEW,preview); lsSet(LS_PROGRAM,program);   // persist the one-time clear-rule migration
   let presets=loadPresets();
   let selectedId=preview.elements.length?preview.elements[0].id:null;
 
@@ -1396,9 +1409,14 @@ if(!isOutput){
     pgStage.setLive(liveData); setTally({el:$("pgTitle")}, !!liveData);
     if(liveMode){ pvStage.setLive(liveData); setTally(pvMonTally,!!liveData); }
     if(sc&&sc.ref)pushLog(sc.ref);                               // log AFTER setLive (clean exclude-live)
-    // clear the ref list only while the slide is cleared AND the operator's clear-rule calls it a full clear
+    // On any clear the running list empties; the header stays through a Clear Slide (presentation
+    // still active) and hides on a Clear All (full clear) so nothing floats on air.
     const _cn=preview.conn||{};
-    if(!text && historyWantsClear(program) && isFullClear(_cn.clearRule||"all",_cn.clearLayer||"media",signals)) clearLog();
+    if(!text){
+      const _full=isFullClear(_cn.clearRule||"pres",_cn.clearLayer||"media",signals);
+      if(historyWantsClear(program)) clearLog();
+      pgStage.setHeaderHold(!_full); pvStage.setHeaderHold(!_full);
+    } else { pgStage.setHeaderHold(true); pvStage.setHeaderHold(true); }
     $("stSlide")&&($("stSlide").textContent=text?(text.length>42?text.slice(0,42)+"\u2026":text):"(clear)");
     $("stLayer")&&($("stLayer").textContent=active===null?"n/a (text mode)":active?"slide ON":"slide CLEAR");
     const on=(active===null)?!!text:!!active;
@@ -1892,16 +1910,16 @@ if(!isOutput){
         statLine("Clear detect","stLayer","\u2014")]),
       el("p",{class:"hint",html:"<b>Clear detect</b> reads ProPresenter's slide layer so F1/F2/clear actually hides the graphic. If it shows <i>n/a (text mode)</i>, your build didn't return layer status \u2014 it falls back to empty-text detection."}),
       el("div",{class:"grp"},[el("div",{class:"gh",text:"Clear behavior \u2014 Previously-Referenced list"}),
-        el("p",{class:"hint",html:"Pick what makes the scripture ref list clear. Watch the live signals below while you press <b>Clear Slide (F2)</b> vs <b>Clear All</b> in ProPresenter, then choose the option that only fires on a full clear."}),
-        rowSeg("Clear the ref list when",cn.clearRule||"all",
-          [["pres","Clear All (presentation cleared)"],["all","All layers off"],["layer","A layer turns off"],["manual","Manual only"]],
-          (v)=>{cn.clearRule=v;savePreview();renderPanels();}),
-        (cn.clearRule==="layer")?rowSelect("\u2026when this layer turns off",cn.clearLayer||"media",
+        el("p",{class:"hint",html:"The list clears whenever you clear the slide. The <b>header</b> stays through <b>Clear Slide (F2)</b> but disappears on <b>Clear All</b>. Pick how the app detects a full Clear All, and watch the live signals as you test."}),
+        rowSeg("Detect a full Clear All by",cn.clearRule||"pres",
+          [["pres","Presentation cleared"],["all","All layers off"],["layer","A layer turns off"],["manual","Never (manual only)"]],
+          (v)=>{cn.clearRule=v;cn._ruleMig=true;savePreview();renderPanels();}),
+        (cn.clearRule==="layer")?rowSelect("\u2026this layer turns off",cn.clearLayer||"media",
           [["media","Media"],["props","Props"],["messages","Messages"],["announcements","Announcements"],["video_input","Video input"],["audio","Audio"]],
           (v)=>{cn.clearLayer=v;savePreview();}):null,
         el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"}),
         el("div",{class:"row"},[el("button",{class:"btn sm full",text:"Clear scripture list now",onclick:()=>{manualClearList();}})]),
-        el("p",{class:"hint",html:"<b>Clear All (presentation cleared)</b> is the recommended fix so Clear Slide (F2) leaves the list up. Rule changes reach the OBS output after the next <b>Take</b>."})
+        el("p",{class:"hint",html:"<b>Presentation cleared</b> (recommended) keeps the header up on Clear Slide and removes it on Clear All. Changes reach the OBS output after the next <b>Take</b>."})
       ])
     ],false,"conn");
   }

@@ -21,7 +21,13 @@ for (const s of suites) {
   try {
     const out = execFileSync('node', [path.join(__dirname, s + '.js')], { encoding: 'utf8' });
     const line = out.split('\n').filter(l => /TOTAL ERRORS|RESULT|ERRORS:/.test(l)).pop() || 'ok';
-    console.log(line.trim());
+    // Older suites call process.exit(0) unconditionally, so a non-zero exit isn't enough —
+    // also treat any "**FAIL**" line in the output as a failure so nothing hides.
+    if (/\*\*FAIL\*\*/.test(out)) {
+      failed++;
+      const fails = out.split('\n').filter(l => /\*\*FAIL\*\*/.test(l)).slice(0, 3).map(l => l.trim()).join(' | ');
+      console.log('FAILED  ' + fails);
+    } else { console.log(line.trim()); }
   } catch (e) {
     failed++;
     const out = (e.stdout || '') + (e.stderr || '');

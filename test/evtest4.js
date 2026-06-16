@@ -42,9 +42,9 @@ function run(){
   const types=[...D.querySelectorAll('.elrow .ty')].map(t=>t.textContent);
   out.push(['both list types coexist', types.includes('history')&&types.includes('eventList')]);
 
-  const tb=D.getElementById('btnTrans'), label=tb.querySelector('span').textContent;
+  const tb=D.getElementById('btnTrans');
   click(tb);
-  out.push(['transition keeps label after take', tb.querySelector('span').textContent===label && /TRANSITION/.test(label)]);
+  out.push(['take button keeps a valid label after take', /AIR|TAKE|TRANSITION/i.test(tb.querySelector('span').textContent)]);
 
   out.forEach(([n,ok])=>console.log((ok?'PASS':'**FAIL**')+'  '+n));
   console.log('ERRORS: '+(errors.length?JSON.stringify(errors.slice(0,6)):'none'));

@@ -4,7 +4,7 @@
 const { JSDOM } = require('jsdom');
 const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'lt.html'), 'utf8');
 const errors = [];
-let slideText = '', slideActive = true, layersObj = null, sseInst = null;
+let slideText = '', slideActive = true, layersObj = null, sseInst = null, presActive = true;
 const dom = new JSDOM(html, {
   url: 'http://localhost:7777/output', runScripts: 'dangerously', pretendToBeVisual: true,
   beforeParse(w) {
@@ -14,6 +14,7 @@ const dom = new JSDOM(html, {
     w.Element.prototype.animate = function () { return { cancel() {}, finished: Promise.resolve() }; };
     w.fetch = (u) => {
       const url = String(u);
+      if (/active/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ presentation: presActive ? { id: { uuid: 'x', name: 'Deck', index: 0 } } : null }) });
       if (/layers/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve(layersObj || { slide: slideActive, media: true }) });
       if (/slide/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ current: { text: slideText } }) });
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
@@ -27,6 +28,7 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
 const outWrap = (sel) => [...D.querySelectorAll('#out-scaler .lt-el')].find(x => x.querySelector(sel));
 const outRef = () => { const w = outWrap('.r-ref'); return w ? w.querySelector('.r-ref').textContent : ''; };
 const outList = () => { const e = outWrap('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].map(t => t.textContent) : []; };
+const outHeadingShown = () => { const w = outWrap('.h-label'); const h = w && w.querySelector('.h-label'); return !!h && h.style.display !== 'none'; };
 const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
 
 (async () => {
@@ -51,13 +53,17 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
   slideText = 'Romans 8:28\nAnd we know.'; await sleep(400);
   ok('second verse logged on output', outList().includes('Romans 8:28'));
 
-  // F2 (slide off, media still up) -> output ref list STAYS
-  slideText = ''; slideActive = false; layersObj = { slide: false, media: true }; await sleep(400);
-  ok('F2 clear-slide: output ref list STAYS', outList().length > 0);
+  // F2 (Clear Slide): presentation still active -> list clears but the header STAYS
+  slideText = ''; slideActive = false; presActive = true; layersObj = { slide: false, media: false }; await sleep(700);
+  ok('F2: output ref list clears', outList().length === 0);
+  ok('F2: output header STAYS (presentation still active)', outHeadingShown());
 
-  // F1 (every visual layer off) -> output ref list cleared
-  layersObj = { slide: false, media: false }; await sleep(700);
-  ok('F1 Clear-All: output ref list cleared', outList().length === 0);
+  // re-populate, then F1 (Clear All): presentation cleared -> list clears AND header hides
+  slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = { slide: true, media: false }; await sleep(400);
+  ok('output list repopulates', outList().includes('Psalm 23:1'));
+  slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: false }; await sleep(700);
+  ok('F1: output ref list clears', outList().length === 0);
+  ok('F1: output header HIDES (presentation cleared)', !outHeadingShown());
 
   // a partial/garbage broadcast must not throw on-air (deepMerge guard)
   const errBefore2 = errors.length;
