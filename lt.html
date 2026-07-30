@@ -874,6 +874,11 @@ function makeElRenderer(){
     if(s.maxLines&&s.maxLines>0){node.classList.add("clamp");node.style.webkitLineClamp=String(s.maxLines);}
     else {node.classList.remove("clamp");node.style.webkitLineClamp="";} }
   function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+  // Scripture/Reference can be switched to "Manual" in the inspector, which stores the
+  // operator's typed verse in d.content — but the live feed supplies it via `data`.
+  // Return d.content ONLY for a manual element: falling back on a LIVE one would paint a
+  // stale default reference next to a live verse body. Null means "no fallback allowed".
+  function manualContent(d){ return (d.source&&d.source.kind==="live")?null:(d.content||{}); }
 
   function buildContent(d){
     content.querySelectorAll(".node").forEach(n=>n.remove());
@@ -931,13 +936,15 @@ function makeElRenderer(){
     if(marqOn){ marqOn=false; buildContent(d); }   // ticker turned off -> restore normal nodes
     if(t==="scripture"){
       const ref=content.querySelector(".r-ref"), body=content.querySelector(".r-body");
-      const rtext=(data&&data.ref)||""; const tr=(data&&data.translation)||"";
+      const mc=manualContent(d);
+      const rtext=(data&&data.ref)||(mc&&mc.ref)||""; const tr=(data&&data.translation)||(mc&&mc.translation)||"";
       if(rtext&&tr&&d.showTr!==false) ref.innerHTML=esc(rtext)+` <span class="tr">${esc(tr)}</span>`;
       else ref.textContent=rtext;
       ref.style.display=rtext?"block":"none"; typeCss(ref,st.ref);
-      const bt=(data&&data.body)||""; body.textContent=bt; body.style.display=bt?"block":"none"; typeCss(body,st.body);
+      const bt=(data&&data.body)||(mc&&mc.body)||""; body.textContent=bt; body.style.display=bt?"block":"none"; typeCss(body,st.body);
     } else if(t==="reference"){
-      const ref=content.querySelector(".r-ref"); const rtext=(data&&data.ref)||""; const tr=(data&&data.translation)||"";
+      const ref=content.querySelector(".r-ref"); const mc=manualContent(d);
+      const rtext=(data&&data.ref)||(mc&&mc.ref)||""; const tr=(data&&data.translation)||(mc&&mc.translation)||"";
       if(rtext&&tr&&d.showTr!==false) ref.innerHTML=esc(rtext)+` <span class="tr">${esc(tr)}</span>`;
       else ref.textContent=rtext;
       ref.style.display=rtext?"block":"none"; typeCss(ref,st.ref);
