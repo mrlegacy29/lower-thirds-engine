@@ -2,7 +2,7 @@
 
 All suites run under **jsdom** (no browser) and load `lt.html` from
 `../lt.html`. `npm test` runs `test/run-all.js`, which first syntax-checks the
-single-file app, then runs all 14 suites and aggregates pass/fail.
+single-file app, then runs all 15 suites and aggregates pass/fail.
 
 ## Conventions that matter (jsdom quirks)
 
@@ -47,6 +47,26 @@ single-file app, then runs all 14 suites and aggregates pass/fail.
 | `pp_resilience_test` | ProPresenter poll failures hold the last good state instead of blanking the on-air verse |
 | `clear_rule_test` | the configurable Clear Behavior rules (`pres` / `all` / layer-based) |
 | `manual_source_test` | Scripture/Reference in **Manual** source render `d.content`; live elements never fall back to it (placeholder-leak guard) |
+| `source_fallback_test` | the same source rules across **both** render paths (static *and* ticker), plus the Name/Text live-placeholder guard and the standing-role-label rule |
+
+## The source-fallback rule (read before touching `setText` / `marqText`)
+
+Every element ships with placeholder content (`John 3:16`, `Pastor Mike Reynolds`,
+`Custom text`) in `d.content`. What may fall back to it is **per type**, and two of the
+rules are counterintuitive:
+
+- **Scripture / Reference / Text** — fall back only when Source is *Manual*. `manualContent(d)`
+  returns `null` for live elements precisely so they can't. Never loosen this: a non-scripture
+  slide legitimately yields `{ref:"", body:<slide text>}`, so an unguarded fallback paints
+  *John 3:16 next to an announcement slide*.
+- **Name** — asymmetric on purpose, via `nameFor()` / `titleFor()`. The **name** never falls
+  back when live. The **title** does, because it doubles as a standing role label for
+  one-line slides — but only when a live name exists, so a blank slide paints nothing.
+
+**Both render paths need every rule.** `setText()` early-returns into `renderMarquee()` when
+Motion is Ticker or Credits-Roll, so `marqText()` renders that DOM instead and needs the
+identical logic. A fix applied to only one path is invisible until someone turns on a ticker —
+that is exactly how the manual-Scripture-scrolls-only-diamonds bug survived v1.0.5.
 
 ## Adding a feature
 

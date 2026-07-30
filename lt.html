@@ -880,6 +880,21 @@ function makeElRenderer(){
   // stale default reference next to a live verse body. Null means "no fallback allowed".
   function manualContent(d){ return (d.source&&d.source.kind==="live")?null:(d.content||{}); }
 
+  // Name is the one type with an asymmetric rule, so both render paths (setText and the
+  // ticker's marqText) share these two helpers rather than each rolling their own.
+  //   NAME  - must come from the slide when live. A blank/whitespace slide has no name, and
+  //           painting the stored placeholder ("Pastor Mike Reynolds") would be wrong on air.
+  //   TITLE - doubles as a STANDING ROLE LABEL: when the slide supplies no second line, fall
+  //           back to the operator's configured "Title / role" (exposed in the inspector in
+  //           Live mode too, so it is a visible choice rather than an invisible default).
+  //           Gated on a live name existing, so a blank slide still paints nothing at all.
+  function nameFor(d,data){ const mc=manualContent(d); return (data&&data.name)||(mc&&mc.name)||""; }
+  function titleFor(d,data,nv){
+    const live=(data&&data.title)||"";
+    if(live) return live;
+    return nv?((d.content&&d.content.title)||""):"";
+  }
+
   function buildContent(d){
     content.querySelectorAll(".node").forEach(n=>n.remove());
     marqTrack=null; marqSig=""; marqOn=false;
@@ -898,10 +913,15 @@ function makeElRenderer(){
 
   // text used by the ticker / credits-roll for each type
   function marqText(d,data){ const t=d.type, c=d.content||{};
-    if(t==="text")return [(data&&data.text)||c.text||""];
-    if(t==="reference")return [(data&&data.ref)||""];
-    if(t==="scripture"){ const b=(data&&data.body)||""; const r=(data&&data.ref)||""; return [b||r]; }
-    if(t==="name"){ const n=(data&&data.name)||c.name||""; const ti=(data&&data.title)||c.title||""; return [n+(ti?"  \u2014  "+ti:"")]; }
+    if(t==="text"){ const mc=manualContent(d); return [(data&&data.text)||(mc&&mc.text)||""]; }
+    // Same manual-source rule as setText(): a ticker/roll element is rendered HERE instead,
+    // so it needs the identical d.content fallback -- without it a manual Scripture/Reference
+    // set to Ticker scrolled nothing but the separator diamonds. manualContent() keeps the
+    // live-element guard intact (null for live -> no placeholder leak).
+    if(t==="reference"){ const mc=manualContent(d); return [(data&&data.ref)||(mc&&mc.ref)||""]; }
+    if(t==="scripture"){ const mc=manualContent(d);
+      const b=(data&&data.body)||(mc&&mc.body)||""; const r=(data&&data.ref)||(mc&&mc.ref)||""; return [b||r]; }
+    if(t==="name"){ const n=nameFor(d,data), ti=titleFor(d,data,n); return [n+(ti?"  \u2014  "+ti:"")]; }
     if(t==="sermonTitle")return [(c.title||"")+(c.sub?"  \u2014  "+c.sub:"")];
     if(t==="bulletList")return (c.bullets||"").split("\n").map(s=>s.trim()).filter(Boolean);
     if(t==="history"||t==="eventList"){ const items=((data&&data.items)||[]).map(x=>x.ref); return items.length?items:[]; }
@@ -954,11 +974,12 @@ function makeElRenderer(){
       su.textContent=d.content.sub||""; su.style.display=d.content.sub?"block":"none"; typeCss(su,st.sub);
     } else if(t==="name"){
       const nm=content.querySelector(".n-name"), ti=content.querySelector(".n-title");
-      const nv=(data&&data.name)||d.content.name||""; const tv=(data&&data.title)||d.content.title||"";
+      const nv=nameFor(d,data), tv=titleFor(d,data,nv);
       nm.textContent=nv; nm.style.display=nv?"block":"none"; typeCss(nm,st.name);
       ti.textContent=tv; ti.style.display=tv?"block":"none"; typeCss(ti,st.title);
     } else if(t==="text"){
-      const tx=content.querySelector(".t-text"); const v=(data&&data.text)||d.content.text||"";
+      const tx=content.querySelector(".t-text"); const mc=manualContent(d);
+      const v=(data&&data.text)||(mc&&mc.text)||"";
       tx.textContent=v; typeCss(tx,st.text);
     } else if(t==="bulletList"){
       const hd=content.querySelector(".b-head"), ul=content.querySelector(".b-list");
@@ -1881,7 +1902,11 @@ if(!isOutput){
       return group("Content",[
         rowSeg("Source",d.source.kind,[["manual","Manual"],["live","Live (current slide lines)"]],(v)=>{d.source.kind=v;onCh();renderPanels();}),
         d.source.kind==="manual"?rowText("Name",c.name,(v)=>{c.name=v;onCh();}):null,
-        d.source.kind==="manual"?rowText("Title / role",c.title,(v)=>{c.title=v;onCh();}):null,
+        rowText("Title / role",c.title,(v)=>{c.title=v;onCh();}),
+        // Shown in LIVE mode too: it is the standing role label used when the slide has no
+        // second line. Leaving it hidden meant the factory default ("Lead Pastor") could go
+        // on air under a guest speaker with no way for the operator to see or clear it.
+        d.source.kind==="live"?el("p",{class:"hint",text:"Shown under the name when the live slide has only one line. Leave empty for no role label."}):null,
         typeGroup("Name style",st.name,onCh),
         typeGroup("Title style",st.title,onCh)
       ]);
