@@ -17,7 +17,7 @@ function setVal(n,v,type){ n.value=v; n.dispatchEvent(new W.Event(type||'input',
 function txt(){return D.body.textContent;}
 function findBtn(re){return [...D.querySelectorAll('button')].find(b=>re.test(b.textContent));}
 
-setTimeout(()=>{
+setTimeout(async()=>{
   const out=[];
   // ---- boot: scripture must be visible on the preview canvas now ----
   const pvEls=D.getElementById('pv-scaler').querySelectorAll('.lt-el');
@@ -80,8 +80,20 @@ setTimeout(()=>{
   out.push(['transition + revert: no errors', errors.length===beforeTake]);
 
   // ---- preset: new folder + save preset (prompt stubbed) ----
+  // Naming uses an in-page dialog now: Electron does not implement window.prompt,
+  // so the old prompt() flow was a silent no-op in the packaged app.
+  function answerAsk(text){
+    const ask=D.querySelector('.lt-ask'); if(!ask)return false;
+    const i=ask.querySelector('input'); if(i){ i.value=text; i.dispatchEvent(new W.Event('input',{bubbles:true})); }
+    const okb=ask.querySelector('[data-ask="ok"]'); if(okb)click(okb);
+    return true;
+  }
   const bSave=findBtn(/Save preview as preset/);
-  if(bSave){ const be=errors.length; click(bSave); out.push(['save preset: no errors', errors.length===be]);
+  if(bSave){ const be=errors.length; click(bSave);
+    out.push(['save preset: naming dialog opened', !!D.querySelector('.lt-ask')]);
+    answerAsk('Swept Preset');
+    await new Promise(r=>setTimeout(r,30));   // let the dialog's promise settle
+    out.push(['save preset: no errors', errors.length===be]);
     out.push(['preset row created with SVG icons', [...D.querySelectorAll('.preset .ic')].every(b=>b.querySelector('svg')) && D.querySelectorAll('.preset').length>0]); }
 
   out.forEach(([n,ok])=>console.log((ok?'PASS':'**FAIL**')+'  '+n));

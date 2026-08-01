@@ -569,6 +569,17 @@ function createElement(type){
     base.content={};
     base.box=boxDefaults({style:"minimal",useGrad:false,opacity:0,accent:false,shadow:false,blur:0,padX:0,padY:0,radius:8,
       mediaFit:"contain"});
+  } else if(type==="clock"){
+    // Three modes. "pptimer" is the one nothing else in this category can do: it
+    // MIRRORS a live ProPresenter timer, so the countdown on air is the same clock
+    // the stage is watching instead of a second one that drifts.
+    base.name="Timer / clock"; base.layout={x:1380,y:80,w:420,h:170};
+    base.source={kind:"manual"};
+    base.content={mode:"time",label:"",target:"11:00",timerName:"",fmt:"h:mm",
+                  hideAtZero:false,zeroText:"0:00"};
+    base.style={ label:styleDefaults({font:"'Oswald',sans-serif",size:24,weight:"600",color:"#c9a24b",upper:true,letter:2}),
+                 time:styleDefaults({font:"'Oswald',sans-serif",size:76,weight:"700",color:"#ffffff"}) };
+    base.box=boxDefaults();
   }
   return base;
 }
@@ -589,8 +600,63 @@ function migrateClearRule(cfg){
 }
 
 const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Sermon title",
-  bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media"};
-const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media"];
+  bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media",
+  clock:"Timer / clock"};
+const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media","clock"];
+
+/* ------------------------------------------------------------- clock helpers */
+function pad2(n){ n=Math.floor(Math.abs(n)); return (n<10?"0":"")+n; }
+// secs -> "h:mm:ss" / "m:ss" depending on size, or forced by fmt
+function fmtDur(secs,fmt){
+  const neg=secs<0; secs=Math.abs(Math.floor(secs||0));
+  const h=Math.floor(secs/3600), m=Math.floor((secs%3600)/60), s=secs%60;
+  let out;
+  if(fmt==="mm:ss") out=Math.floor(secs/60)+":"+pad2(s);
+  else if(fmt==="h:mm:ss"||h>0) out=h+":"+pad2(m)+":"+pad2(s);
+  else out=m+":"+pad2(s);
+  return (neg?"-":"")+out;
+}
+function fmtClock(d,fmt){
+  let h=d.getHours(); const m=d.getMinutes(), s=d.getSeconds();
+  if(fmt==="H:mm"||fmt==="H:mm:ss") return h+":"+pad2(m)+(fmt==="H:mm:ss"?":"+pad2(s):"");
+  const ap=h>=12?"PM":"AM"; h=h%12; if(h===0)h=12;
+  return h+":"+pad2(m)+(fmt==="h:mm:ss"?":"+pad2(s):"")+" "+ap;
+}
+// "11:00" / "11:00:30" -> seconds remaining until that time TODAY (next day if past)
+function secsUntilClock(target,now){
+  const mm=String(target||"").match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/); if(!mm)return null;
+  const t=new Date(now.getTime());
+  t.setHours(Number(mm[1]),Number(mm[2]),Number(mm[3]||0),0);
+  let diff=Math.round((t.getTime()-now.getTime())/1000);
+  if(diff<-60) diff+=86400;                     // rolled past midnight -> aim at tomorrow
+  return diff;
+}
+// ProPresenter timer payloads vary by build; pull a seconds value out defensively.
+function ppTimerSeconds(t){
+  if(t==null)return null;
+  if(typeof t==="number")return t;
+  if(typeof t==="string"){
+    const m=t.match(/^(-)?(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+    if(m){ const v=(Number(m[2]||0)*3600)+(Number(m[3])*60)+Number(m[4]); return m[1]?-v:v; }
+    const n=Number(t); return isNaN(n)?null:n;
+  }
+  if(typeof t==="object"){
+    for(const k of ["time","seconds","value","remaining","duration"]){
+      if(t[k]!=null){ const v=ppTimerSeconds(t[k]); if(v!=null)return v; }
+    }
+    if(t.countdown!=null)return ppTimerSeconds(t.countdown);
+    if(t.elapsed!=null)return ppTimerSeconds(t.elapsed);
+    if(t.data!=null)return ppTimerSeconds(t.data);
+  }
+  return null;
+}
+function ppTimerName(t){
+  if(!t||typeof t!=="object")return "";
+  if(typeof t.name==="string")return t.name;
+  if(t.id&&typeof t.id==="object"&&typeof t.id.name==="string")return t.id.name;
+  if(typeof t.id==="string")return t.id;
+  return "";
+}
 
 /* ============================================== GRAPHICS IMPORT / EXPORT (pure)
    Portable .json for moving designs between machines (home <-> stream PC), backing
@@ -688,6 +754,49 @@ function parseGfx(text){
     return {ok:true,kind:"library",payload:folders};
   }
   return {ok:false,error:"That file doesn't look like a graphic, look, or preset library."};
+}
+
+/* ------------------------------------------------------------------- askText
+   Electron does NOT implement window.prompt — it is a no-op that logs an error.
+   Every "name this preset / folder" flow used prompt(), so in the PACKAGED app
+   those buttons silently did nothing while working fine in a browser. This is a
+   real in-page dialog, so naming works everywhere.
+   Returns a Promise<string|null>; null means the operator cancelled. */
+function askText(label,def,okLabel){
+  return new Promise((resolve)=>{
+    let done=false;
+    const back=el("div",{class:"lt-ask",role:"dialog","aria-modal":"true",
+      style:"position:fixed;inset:0;z-index:2147483646;background:rgba(4,8,16,.62);"+
+      "display:flex;align-items:center;justify-content:center;font-family:'Inter',system-ui,Segoe UI,Arial,sans-serif"});
+    const box=el("div",{style:"min-width:340px;max-width:90vw;background:#121a2b;border:1px solid #2b3a5e;"+
+      "border-radius:12px;padding:16px 16px 14px;box-shadow:0 24px 70px rgba(0,0,0,.55)"});
+    const h=el("div",{style:"font-size:13px;font-weight:700;color:#eef3fb;margin-bottom:10px"});
+    h.append(document.createTextNode(String(label||"Enter a value")));
+    const inp=el("input",{type:"text",value:def==null?"":String(def),
+      style:"width:100%;box-sizing:border-box;background:#0b1220;border:1px solid #2b3a5e;border-radius:8px;"+
+            "color:#eef3fb;font-size:13px;padding:8px 10px;outline:none"});
+    const row=el("div",{style:"display:flex;gap:8px;justify-content:flex-end;margin-top:12px"});
+    const cancel=el("button",{class:"btn sm","data-ask":"cancel",text:"Cancel"});
+    const okb=el("button",{class:"btn sm primary","data-ask":"ok",text:okLabel||"OK"});
+    row.append(cancel,okb); box.append(h,inp,row); back.append(box);
+
+    function finish(v){
+      if(done)return; done=true;
+      document.removeEventListener("keydown",onKey,true);
+      try{ back.remove(); }catch(e){}
+      resolve(v);
+    }
+    function onKey(e){
+      if(e.key==="Escape"){ e.preventDefault(); finish(null); }
+      else if(e.key==="Enter"){ e.preventDefault(); finish(inp.value.trim()||null); }
+    }
+    okb.onclick=()=>finish(inp.value.trim()||null);
+    cancel.onclick=()=>finish(null);
+    back.onclick=(e)=>{ if(e.target===back) finish(null); };   // click-away cancels
+    document.addEventListener("keydown",onKey,true);
+    document.body.appendChild(back);
+    setTimeout(()=>{ try{ inp.focus(); inp.select(); }catch(e){} },0);
+  });
 }
 
 function gfxSave(obj,filename){
@@ -846,47 +955,92 @@ function isFullClear(rule, layer, signals){
 function createPP(opts){
   let host,port,pollMs,timer=null,running=false,lastKey="",lastSigKey="",supportsLayers=true;
   let lastActive=null,lastAllClr=null,lastLayers=null,lastPres=null;
-  async function tick(){
-    if(!running)return;
-    let slideText="",active=null,allClr=null,slideOk=false,layersMap=lastLayers,presPop=lastPres;
+  // Every connect() bumps the generation. A tick that was mid-await when the
+  // operator hit "Connect / reconnect" belongs to an older generation and must
+  // die instead of scheduling another timer — otherwise each reconnect FORKED a
+  // second poll loop, and the stale one could repaint a previous verse on air.
+  let gen=0;
+  let wantTimers=false;      // set true only while a clock element mirrors a PP timer
+  // A layers payload we don't recognise used to latch layer support off for the
+  // whole session on ONE bad read (a {} body, a 200-with-error, a PP hiccup), and
+  // clear detection never came back. Require several in a row.
+  let unknownLayers=0;
+  const UNKNOWN_LAYERS_LIMIT=3;
+
+  // No timeout on a fetch means one request that never settles stalls the feed
+  // forever while the console still says "Connected". Abort well inside the poll
+  // cadence and just retry.
+  async function ppGet(path,signal){
+    return fetch(ppUrl(host,port,path),{cache:"no-store",signal});
+  }
+
+  async function tick(myGen){
+    if(!running || myGen!==gen) return;
+    const ctl=(typeof AbortController!=="undefined")?new AbortController():null;
+    const sig=ctl?ctl.signal:undefined;
+    const watchdog=setTimeout(()=>{ try{ ctl&&ctl.abort(); }catch(e){} }, Math.max(2000,(pollMs||200)*8));
     try{
-      const r=await fetch(ppUrl(host,port,"/v1/status/slide"),{cache:"no-store"});
-      if(r.ok){ const d=await r.json(); const dd=(d&&d.data&&(d.current||d.next)?d:(d.data||d));
-        const cur=dd&&dd.current; slideText=cur&&cur.text!=null?cur.text:""; slideOk=true; opts.onReach&&opts.onReach(true); }
-      else { opts.onReach&&opts.onReach(false); }
-    }catch(e){ opts.onReach&&opts.onReach(false,e); }
-    // A failed slide poll (network blip / PP busy) must NOT blank the on-air verse:
-    // hold the last good state and try again next tick.
-    if(!slideOk){ timer=setTimeout(tick,pollMs); return; }
-    if(supportsLayers){
-      let layerOkThisTick=false;
-      try{ const lr=await fetch(ppUrl(host,port,"/v1/status/layers"),{cache:"no-store"});
-        if(lr.ok){ const lj=await lr.json(); const a=slideLayerActive(lj);
-          if(a===null){ supportsLayers=false; }                 // genuine: this build doesn't report layer status
-          else { active=a; allClr=allLayersClear(lj); layersMap=normLayers(lj); lastActive=active; lastAllClr=allClr; lastLayers=layersMap; layerOkThisTick=true; } }
-        // a non-ok layers status is transient — do NOT latch supportsLayers off
-      }catch(e){ /* transient layers failure — do NOT latch off; retry next tick */ }
-      // on a transient layers miss, reuse the last good reading instead of flapping
-      if(supportsLayers && !layerOkThisTick){ active=lastActive; allClr=lastAllClr; layersMap=lastLayers; }
+      let slideText="",active=null,allClr=null,slideOk=false,layersMap=lastLayers,presPop=lastPres;
+      try{
+        const r=await ppGet("/v1/status/slide",sig);
+        if(r.ok){ const d=await r.json(); const dd=(d&&d.data&&(d.current||d.next)?d:(d.data||d));
+          const cur=dd&&dd.current; slideText=cur&&cur.text!=null?cur.text:""; slideOk=true; opts.onReach&&opts.onReach(true); }
+        else { opts.onReach&&opts.onReach(false); }
+      }catch(e){ opts.onReach&&opts.onReach(false,e); }
+      if(!running || myGen!==gen) return;
+      // A failed slide poll (network blip / PP busy) must NOT blank the on-air verse:
+      // hold the last good state and try again next tick.
+      if(!slideOk){ return; }
+      if(supportsLayers){
+        let layerOkThisTick=false;
+        try{ const lr=await ppGet("/v1/status/layers",sig);
+          if(lr.ok){ const lj=await lr.json(); const a=slideLayerActive(lj);
+            if(a===null){ if(++unknownLayers>=UNKNOWN_LAYERS_LIMIT) supportsLayers=false; }
+            else { unknownLayers=0; active=a; allClr=allLayersClear(lj); layersMap=normLayers(lj); lastActive=active; lastAllClr=allClr; lastLayers=layersMap; layerOkThisTick=true; } }
+          // a non-ok layers status is transient — do NOT latch supportsLayers off
+        }catch(e){ /* transient layers failure — do NOT latch off; retry next tick */ }
+        if(!running || myGen!==gen) return;
+        // on a transient layers miss, reuse the last good reading instead of flapping
+        if(supportsLayers && !layerOkThisTick){ active=lastActive; allClr=lastAllClr; layersMap=lastLayers; }
+      }
+      // presentation/active distinguishes Clear All (presentation cleared -> null) from
+      // Clear Slide (slide hidden but the presentation stays active -> populated). Hold last on a blip.
+      try{ const pr=await ppGet("/v1/presentation/active",sig);
+        if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation!=null); lastPres=presPop; }
+      }catch(e){ /* transient — hold last */ }
+      if(!running || myGen!==gen) return;
+      // Timers are only polled when a clock element is actually mirroring one, so
+      // the common config pays nothing for this.
+      if(wantTimers){
+        try{ const tr=await ppGet("/v1/timers",sig);
+          if(tr.ok){ const tj=await tr.json();
+            const arr=Array.isArray(tj)?tj:(Array.isArray(tj&&tj.data)?tj.data:(Array.isArray(tj&&tj.timers)?tj.timers:[]));
+            try{ opts.onTimers && opts.onTimers(arr); }catch(e){} }
+        }catch(e){ /* transient — keep the last known timers */ }
+        if(!running || myGen!==gen) return;
+      }
+      // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
+      const cleared = (active===false) || (active===null && !slideText.trim());
+      const clearAll = (allClr===true);
+      const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll };
+      const sigKey = active+"|"+presPop+"|"+JSON.stringify(layersMap||0);
+      // Callback exceptions are contained: a render error must never stop the feed.
+      if(sigKey!==lastSigKey){ lastSigKey=sigKey; try{ opts.onSignals && opts.onSignals(signals); }catch(e){} }
+      const key=(cleared?"__CLEAR__":slideText)+"|"+active+"|"+clearAll+"|"+presPop;
+      if(key!==lastKey){ lastKey=key; try{ opts.onUpdate(cleared?"":slideText, active, clearAll, signals); }catch(e){} }
+    }catch(e){
+      /* nothing above may kill the loop — the finally below always re-arms */
+    }finally{
+      clearTimeout(watchdog);
+      if(running && myGen===gen) timer=setTimeout(()=>tick(myGen),pollMs);
     }
-    // presentation/active distinguishes Clear All (presentation cleared -> null) from
-    // Clear Slide (slide hidden but the presentation stays active -> populated). Hold last on a blip.
-    try{ const pr=await fetch(ppUrl(host,port,"/v1/presentation/active"),{cache:"no-store"});
-      if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation!=null); lastPres=presPop; }
-    }catch(e){ /* transient — hold last */ }
-    // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
-    const cleared = (active===false) || (active===null && !slideText.trim());
-    const clearAll = (allClr===true);
-    const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll };
-    const sigKey = active+"|"+presPop+"|"+JSON.stringify(layersMap||0);
-    if(sigKey!==lastSigKey){ lastSigKey=sigKey; opts.onSignals && opts.onSignals(signals); }
-    const key=(cleared?"__CLEAR__":slideText)+"|"+active+"|"+clearAll+"|"+presPop;
-    if(key!==lastKey){ lastKey=key; opts.onUpdate(cleared?"":slideText, active, clearAll, signals); }
-    timer=setTimeout(tick,pollMs);
   }
   return {
-    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;lastKey="";lastSigKey="";lastActive=null;lastAllClr=null;lastLayers=null;lastPres=null;tick(); },
-    stop(){ running=false; if(timer){clearTimeout(timer);timer=null;} },
+    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;unknownLayers=0;
+      lastKey="";lastSigKey="";lastActive=null;lastAllClr=null;lastLayers=null;lastPres=null;
+      const myGen=++gen; tick(myGen); },
+    stop(){ running=false; gen++; if(timer){clearTimeout(timer);timer=null;} },
+    setWantTimers(b){ wantTimers=!!b; },
     layersSupported(){return supportsLayers;}
   };
 }
@@ -1026,6 +1180,7 @@ function makeElRenderer(){
     else if(t==="name"){ content.append(el("div",{class:"node n-name"}),el("div",{class:"node n-title"})); }
     else if(t==="text"){ content.append(el("div",{class:"node t-text"})); }
     else if(t==="media"){ content.append(el("div",{class:"node media-hint"})); }
+    else if(t==="clock"){ content.append(el("div",{class:"node k-label"}),el("div",{class:"node k-time"})); }
     else if(t==="bulletList"){ content.append(el("div",{class:"node b-head"}),el("ul",{class:"node b-list"})); }
     else if(t==="history"||t==="eventList"){ content.append(el("div",{class:"node h-label"}),el("div",{class:"node h-items"})); }
   }
@@ -1041,6 +1196,7 @@ function makeElRenderer(){
     if(t==="scripture"){ const mc=manualContent(d);
       const b=(data&&data.body)||(mc&&mc.body)||""; const r=(data&&data.ref)||(mc&&mc.ref)||""; return [b||r]; }
     if(t==="name"){ const n=nameFor(d,data), ti=titleFor(d,data,n); return [n+(ti?"  \u2014  "+ti:"")]; }
+    if(t==="clock"){ const lab=(data&&data.clockLabel)||"", tv=(data&&data.clockText)||""; return [lab?(lab+"  \u2014  "+tv):tv]; }
     if(t==="sermonTitle")return [(c.title||"")+(c.sub?"  \u2014  "+c.sub:"")];
     if(t==="bulletList")return (c.bullets||"").split("\n").map(s=>s.trim()).filter(Boolean);
     if(t==="history"||t==="eventList"){ const items=((data&&data.items)||[]).map(x=>x.ref); return items.length?items:[]; }
@@ -1050,7 +1206,7 @@ function makeElRenderer(){
   // The old generic fallback chain (item||text||ref||title||name) was wrong for two types:
   // a scripture ticker scrolls the verse BODY but got st.ref, and a name ticker leads with
   // the NAME but got st.title — so those elements' real style controls did nothing.
-  const MARQ_STYLE_KEY={scripture:"body",reference:"ref",name:"name",text:"text",sermonTitle:"title",bulletList:"item",history:"item",eventList:"item"};
+  const MARQ_STYLE_KEY={scripture:"body",reference:"ref",name:"name",text:"text",sermonTitle:"title",bulletList:"item",history:"item",eventList:"item",clock:"time"};
   function marqStyle(d){ const st=d.style||{}; const k=MARQ_STYLE_KEY[d.type];
     return (k&&st[k])||st.item||st.text||st.ref||st.title||st.name||styleDefaults(); }
   function renderMarquee(d,data,vertical){
@@ -1125,6 +1281,14 @@ function makeElRenderer(){
       lab.style.display=(d.content.heading && d.showHeading!==false && (items.length>0 || interactive || (data&&data.headerHold)))?"block":"none";
       typeCss(lab,st.heading);
       renderHistChips(d,items);
+    } else if(t==="clock"){
+      // The value is computed upstream in contentFor() (that is where "now" and the
+      // live ProPresenter timer list live) — this just paints it.
+      const lab=content.querySelector(".k-label"), tm=content.querySelector(".k-time");
+      const lv=(data&&data.clockLabel)||"";
+      lab.textContent=lv; lab.style.display=lv?"block":"none"; typeCss(lab,st.label);
+      const tv=(data&&data.clockText)||"";
+      tm.textContent=tv; tm.style.display=tv?"block":"none"; typeCss(tm,st.time);
     } else if(t==="media"){
       const hint=content.querySelector(".media-hint");
       if(hint){ const empty=!(d.box&&d.box.mediaSrc);
@@ -1289,6 +1453,7 @@ function createStage(scaler,opts){
   opts=opts||{}; const interactive=!!opts.interactive;
   const renderers=new Map(); let cfg=null; let selectedId=null;
   let live=null;   // {ref,body,translation,rawText} or null
+  let timers=[];   // live ProPresenter timer objects, for clock elements in "pptimer" mode
   let history=[];
   let onChange=opts.onChange||null, onSelect=opts.onSelect||null;
   let scale=1;
@@ -1303,6 +1468,26 @@ function createStage(scaler,opts){
     }
     if(d.type==="eventList"){ const lines=(d.content.items||"").split("\n").map(s=>s.trim()).filter(Boolean);
       return {items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
+    if(d.type==="clock"){
+      const c=d.content||{}, now=new Date(), fmt=c.fmt||"h:mm";
+      let text="", label=c.label||"";
+      if(c.mode==="countdown"||c.mode==="pptimer"){
+        let secs=null;
+        if(c.mode==="countdown"){ secs=secsUntilClock(c.target,now); }
+        else {
+          const want=String(c.timerName||"").toLowerCase();
+          const list=Array.isArray(timers)?timers:[];
+          const t=want?list.find(x=>ppTimerName(x).toLowerCase()===want)||list.find(x=>ppTimerName(x).toLowerCase().indexOf(want)>=0):list[0];
+          if(t){ secs=ppTimerSeconds(t); if(!label) label=ppTimerName(t); }
+        }
+        if(secs==null) text=interactive?"--:--":"";      // unknown: blank on air, placeholder in the builder
+        else if(secs<=0&&c.hideAtZero) return null;      // "hide when it hits zero" -> element goes off air
+        else text=(secs<=0)?(c.zeroText||fmtDur(0,fmt)):fmtDur(secs,fmt);
+      } else {
+        text=fmtClock(now,fmt);
+      }
+      return {clockText:text,clockLabel:label};
+    }
     if(isLive(d)){
       if(!live) return null;
       if(d.type==="scripture"){ if(d.source.requireRef!==false && !live.ref) return null;
@@ -1377,7 +1562,27 @@ function createStage(scaler,opts){
     renderAll();
   }
   function setLive(d){ live=d; renderAll(); }
+  function setTimers(list){ timers=Array.isArray(list)?list:[]; if(hasClock())renderAll(); }
   function setHistory(arr){ history=arr.slice(); renderAll(); }
+
+  /* ---- clock tick ----------------------------------------------------------
+     Clock/countdown elements are the only ones whose content changes with no
+     external event, so they need their own heartbeat. It only runs while a clock
+     element actually exists, and only re-renders on the second boundary, so a
+     config without one costs nothing. */
+  function hasClock(){ return (cfg&&cfg.elements||[]).some(d=>d&&d.type==="clock"); }
+  let clockTimer=null,lastTickSec=-1;
+  function startClockTick(){
+    if(clockTimer)return;
+    clockTimer=setInterval(()=>{
+      if(!hasClock())return;
+      const s=Math.floor(Date.now()/1000);
+      if(s===lastTickSec)return;            // one repaint per second, not per interval
+      lastTickSec=s;
+      try{ renderAll(); }catch(e){}
+    },250);
+  }
+  function stopClockTick(){ if(clockTimer){clearInterval(clockTimer);clockTimer=null;} }
   let headerHold=false;   // keep the ref-list header visible even when the list is empty (set on a Clear-Slide / partial clear)
   function setHeaderHold(v){ v=!!v; if(headerHold!==v){ headerHold=v; renderAll(); } }
   // Re-play entrance on visible content elements (used by TAKE so animation changes are visible).
@@ -1420,7 +1625,9 @@ function createStage(scaler,opts){
   }
   function clampN(v,a,b){return Math.max(a,Math.min(b,v));}
 
-  return { setConfig,setLive,setHistory,setHeaderHold,select,setScale,replayVisible,
+  startClockTick();
+  return { setConfig,setLive,setTimers,setHistory,setHeaderHold,select,setScale,replayVisible,
+    hasClock, stopClockTick,
     get cfg(){return cfg;}, getRenderer:(id)=>renderers.get(id) };
 }
 
@@ -1465,7 +1672,10 @@ if(isOutput){
   }
   function pushHist(ref){ if(!ref)return; const last=history[history.length-1]; if(last&&last.ref===ref)return; history.push({id:++histId,ref}); stage.setHistory(history); }
 
-  const pp=createPP({onUpdate:onSlide,onReach:()=>{}});
+  const pp=createPP({onUpdate:onSlide,onReach:()=>{},onTimers:(t)=>stage.setTimers(t)});
+  // only poll PP's timers when a clock element is actually mirroring one
+  const wantsPpTimers=(c)=>(c&&c.elements||[]).some(d=>d&&d.type==="clock"&&d.content&&d.content.mode==="pptimer");
+  pp.setWantTimers(wantsPpTimers(program));
   if(program.conn.host) pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);
 
   const bus=createBus();
@@ -1473,6 +1683,7 @@ if(isOutput){
     const merged=deepMerge(defaultConfig(),cfg||{});   // backfill out/conn so a partial broadcast can't throw on-air
     const connChanged=JSON.stringify(merged.conn)!==JSON.stringify(program.conn);
     program=merged; applyBg(document.body,program.out.bg); stage.setConfig(program); stage.setHistory(history);
+    pp.setWantTimers(wantsPpTimers(merged));
     if(connChanged){ pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
     if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; stage.setHistory(history); }  // manual "Clear list" from the console
     if(merged._take && merged._take!==lastTake){ lastTake=merged._take; stage.replayVisible(); }
@@ -1515,7 +1726,9 @@ if(!isOutput){
 
   function savePreview(){ lsSet(LS_PREVIEW,preview); }
   function applyPreview(){ applyBg(pvMon,preview.out.bg); $("pvSafe").style.display=preview.out.safe?"block":"none";
-    pvStage.setConfig(preview); savePreview(); if(typeof updateTakeState==="function")updateTakeState(); }
+    pvStage.setConfig(preview); savePreview(); if(typeof updateTakeState==="function")updateTakeState();
+    // adding/removing a PP-timer clock decides whether the poller fetches timers
+    if(typeof refreshWantTimers==="function")refreshWantTimers(); }
 
   /* ---- preview live/sample feed ---- */
   let liveMode=false;
@@ -1579,12 +1792,19 @@ if(!isOutput){
     const air=$("opAir"); if(air){ air.classList.toggle("live",on); const at=$("opAirTxt"); if(at)at.textContent=on?"ON AIR":"STANDBY"; }
   }
   const pp=createPP({onUpdate:onSlide, onSignals:(s)=>renderClearDiag(s),
+    // Live timers feed BOTH monitors so a mirrored PP countdown previews correctly.
+    onTimers:(t)=>{ pvStage.setTimers(t); pgStage.setTimers(t); },
     onReach:(ok)=>{ const dot=$("connDot"); if(dot)dot.className="dot "+(ok?"ok":"err");
       $("stStatus")&&($("stStatus").textContent=ok?"Connected":"No response");
       const od=$("opConnDot"); if(od)od.className="ops-dot "+(ok?"ok":"err");
       const ot=$("opConnTxt"); if(ot)ot.textContent=ok?"ProPresenter connected":"No response"; }});
   let _ppConnSig="";
-  function startConsolePP(){ pp.stop(); if(preview.conn.host){ pp.connect(preview.conn.host,preview.conn.port,preview.conn.pollMs); _ppConnSig=JSON.stringify(preview.conn); } }
+  // Poll PP timers only while some element on either side is mirroring one.
+  function refreshWantTimers(){
+    const need=(c)=>(c&&c.elements||[]).some(d=>d&&d.type==="clock"&&d.content&&d.content.mode==="pptimer");
+    try{ pp.setWantTimers(need(preview)||need(program)); }catch(e){}
+  }
+  function startConsolePP(){ pp.stop(); refreshWantTimers(); if(preview.conn.host){ pp.connect(preview.conn.host,preview.conn.port,preview.conn.pollMs); _ppConnSig=JSON.stringify(preview.conn); } }
 
   /* ---- TRANSITION (take) / REVERT ---- */
   let _takeNonce=0;
@@ -1646,6 +1866,18 @@ if(!isOutput){
     panels.append(secOutput());
     panels.append(secPresets());
   }
+  // Deleting an element used to leave every reference to it dangling. resolveActive()
+  // then returns false forever for anything with vis:"linked" pointing at it, so that
+  // element vanishes on air with NO way to fix it from the inspector (the dropdown
+  // can't show a deleted target). Same for a dock trigger: the dock silently stops
+  // firing while the inspector still shows it armed.
+  function releaseRefsTo(deadId){
+    (preview.elements||[]).forEach(e=>{
+      if(!e)return;
+      if(e.visWith===deadId){ delete e.visWith; if(e.vis==="linked") e.vis="normal"; }   // fall back to visible
+      if(e.dock&&e.dock.to===deadId){ e.dock.to=null; e.dock.on=false; }
+    });
+  }
   function rebuildInspectorLayoutOnly(){ const s=selected(); if(!s)return;
     ["x","y","w","h"].forEach(k=>{ const inp=document.querySelector(`[data-lay="${k}"]`); if(inp)inp.value=Math.round(s.layout[k]);
       const rv=document.querySelector(`[data-layv="${k}"]`); if(rv)rv.textContent=Math.round(s.layout[k]); }); }
@@ -1680,6 +1912,7 @@ if(!isOutput){
       const del=iconBtn("trash","Delete",(e)=>{e.stopPropagation();
         if(confirm("Delete \""+(d.name||d.type)+"\"?")){ const i=preview.elements.findIndex(x=>x&&x.id===d.id); if(i<0)return;
           preview.elements.splice(i,1);
+          releaseRefsTo(d.id);      // or anything linked/docked to it is hidden forever
           if(selectedId===d.id)selectedId=preview.elements[0]?preview.elements[0].id:null; applyPreview();renderPanels();}},"danger");
       row.append(eye,nm,up,dn,del); list.append(row);
     });
@@ -1875,7 +2108,20 @@ if(!isOutput){
         hasM?el("button",{class:"btn sm danger",text:"Remove",onclick:()=>{b.mediaSrc="";b.mediaType="";onCh();renderPanels();}}):null
       ]),
       fileInput,
-      rowText("\u2026or paste media URL",isUrl?b.mediaSrc:"",(v)=>{const u=v.trim();b.mediaSrc=u;b.mediaType=/\.(mp4|webm|ogv|mov)(\?|$)/i.test(u)?"video":"image";onCh();renderPanels();},"https://\u2026  image or mp4")
+      // rowText binds oninput, so calling renderPanels() from the handler destroyed the
+      // very field being typed into \u2014 the URL box lost focus after one character and a
+      // URL could not be typed or edited at all. Update the model on every keystroke
+      // (so the preview follows along), but only rebuild the panel on COMMIT \u2014 the
+      // change event, i.e. blur or Enter \u2014 which is when the dependent controls (Fit,
+      // Zoom, scrim) need to appear.
+      (function(){
+        const row=rowText("\u2026or paste media URL",isUrl?b.mediaSrc:"",
+          (v)=>{const u=v.trim();b.mediaSrc=u;b.mediaType=/\.(mp4|webm|ogv|mov)(\?|$)/i.test(u)?"video":"image";onCh();},
+          "https://\u2026  image or mp4");
+        const inp=row&&row.querySelector&&row.querySelector("input");
+        if(inp) inp.addEventListener("change",()=>renderPanels());
+        return row;
+      })()
     ];
     if(hasM){
       rows.push(rowSelect("Fit",b.mediaFit,[["cover","Fill & crop (cover)"],["contain","Fit inside (contain)"],["stretch","Stretch to fill"],["center","Center (no scale)"],["tile","Tile / repeat"]],(v)=>{b.mediaFit=v;onCh();}));
@@ -2068,6 +2314,25 @@ if(!isOutput){
         rowSeg("Source",d.source.kind,[["manual","Manual"],["live","Live (raw current slide)"]],(v)=>{d.source.kind=v;onCh();renderPanels();}),
         d.source.kind==="manual"?rowArea("Text",c.text,(v)=>{c.text=v;onCh();}):null,
         typeGroup("Text style",st.text,onCh)
+      ]);
+    }
+    if(t==="clock"){
+      return group("Timer / clock",[
+        rowSeg("Mode",c.mode||"time",[["time","Time of day"],["countdown","Countdown to"],["pptimer","ProPresenter timer"]],
+          (v)=>{c.mode=v;onCh();renderPanels();}),
+        c.mode==="countdown"?rowText("Count down to (24h, e.g. 11:00)",c.target,(v)=>{c.target=v;onCh();},"11:00"):null,
+        c.mode==="pptimer"?rowText("ProPresenter timer name",c.timerName,(v)=>{c.timerName=v;onCh();},"leave blank = first timer"):null,
+        c.mode==="pptimer"?el("p",{class:"hint",html:"Mirrors a <b>live ProPresenter timer</b>, so what's on air is the same clock the stage is watching — not a second one that drifts. Needs the ProPresenter connection above. Leave the name blank to use the first timer it finds."}):null,
+        rowSelect("Format",c.fmt||"h:mm",
+          (c.mode==="time")
+            ? [["h:mm","1:30 PM"],["h:mm:ss","1:30:45 PM"],["H:mm","13:30"],["H:mm:ss","13:30:45"]]
+            : [["h:mm","auto (1:05:30 / 5:30)"],["mm:ss","65:30"],["h:mm:ss","1:05:30"]],
+          (v)=>{c.fmt=v;onCh();}),
+        rowText("Label above the time",c.label,(v)=>{c.label=v;onCh();},"optional — e.g. SERVICE STARTS IN"),
+        (c.mode!=="time")?rowToggle("Hide the element when it reaches zero",!!c.hideAtZero,(v)=>{c.hideAtZero=v;onCh();renderPanels();}):null,
+        (c.mode!=="time"&&!c.hideAtZero)?rowText("Show at zero",c.zeroText,(v)=>{c.zeroText=v;onCh();},"0:00"):null,
+        typeGroup("Label style",st.label,onCh),
+        typeGroup("Time style",st.time,onCh)
       ]);
     }
     if(t==="media"){
@@ -2315,7 +2580,7 @@ if(!isOutput){
         el("span",{class:"fico",html:svg("folder")}),
         el("span",{class:"fn",text:f.name+"  ("+f.items.length+")",onclick:()=>{f._open=!f._open;renderPanels();}}),
         iconBtn("save","Save current preview into this folder",()=>savePresetTo(fi)),
-        iconBtn("pencil","Rename folder",()=>{const n=prompt("Folder name:",f.name);if(n){f.name=n;savePresets(presets);renderPanels();}}),
+        iconBtn("pencil","Rename folder",()=>{askText("Folder name:",f.name,"Rename").then(n=>{if(n){f.name=n;savePresets(presets);renderPanels();}});}),
         iconBtn("trash","Delete folder",()=>{if(confirm("Delete folder + its presets?")){presets.folders.splice(fi,1);savePresets(presets);renderPanels();}},"danger")
       ]);
       fol.append(fh);
@@ -2323,14 +2588,14 @@ if(!isOutput){
         fol.append(el("div",{class:"preset"},[
           el("span",{class:"pn",title:"Load into Preview",text:p.name,onclick:()=>loadPreset(p)}),
           iconBtn("refresh","Overwrite with current preview",()=>{p.config=snapshotForPreset();savePresets(presets);}),
-          iconBtn("pencil","Rename",()=>{const n=prompt("Preset name:",p.name);if(n){p.name=n;savePresets(presets);renderPanels();}}),
+          iconBtn("pencil","Rename",()=>{askText("Preset name:",p.name,"Rename").then(n=>{if(n){p.name=n;savePresets(presets);renderPanels();}});}),
           iconBtn("trash","Delete",()=>{f.items.splice(pi,1);savePresets(presets);renderPanels();},"danger")
         ]));
       }); }
       wrap.append(fol);
     });
     const actions=el("div",{class:"row",style:"flex-wrap:wrap;gap:8px"},[
-      el("button",{class:"btn sm",html:svg("plus")+" New folder",onclick:()=>{const n=prompt("New folder name:","Folder");if(n){presets.folders.push({id:uid(),name:n,items:[]});savePresets(presets);renderPanels();}}}),
+      el("button",{class:"btn sm",html:svg("plus")+" New folder",onclick:()=>{askText("New folder name:","Folder","Create").then(n=>{if(n){presets.folders.push({id:uid(),name:n,items:[]});savePresets(presets);renderPanels();}});}}),
       el("button",{class:"btn sm",html:svg("save")+" Save preview as preset",onclick:()=>savePresetTo(0)}),
       el("button",{class:"btn ghost sm",html:svg("download")+" Export look",title:"Save the current preview design as a portable .json",onclick:exportLook}),
       el("button",{class:"btn ghost sm",html:svg("download")+" Export all presets",title:"Save the whole preset library",onclick:exportPresets}),
@@ -2340,8 +2605,18 @@ if(!isOutput){
     return section("Presets & folders",[wrap,actions,note],false,"presets");
   }
   function snapshotForPreset(){ const c=clone(preview); delete c.conn; return c; }
-  function savePresetTo(fi){ const name=prompt("Preset name:","Preset "+(presets.folders[fi].items.length+1)); if(!name)return;
-    presets.folders[fi].items.push({id:uid(),name,config:snapshotForPreset()}); savePresets(presets); renderPanels(); }
+  // Guard the empty-library case: the folder trash button splices unconditionally,
+  // so after deleting every folder this threw on folders[0] and "Save preview as
+  // preset" was permanently dead with no error shown.
+  function savePresetTo(fi){
+    if(!presets.folders.length){ presets.folders.push({id:uid(),name:"My Presets",items:[]}); fi=0; }
+    if(!presets.folders[fi]) fi=0;
+    askText("Preset name:","Preset "+(presets.folders[fi].items.length+1),"Save").then(name=>{
+      if(!name)return;
+      presets.folders[fi].items.push({id:uid(),name,config:snapshotForPreset()});
+      savePresets(presets); renderPanels();
+    });
+  }
   function loadPreset(p){ const keepConn=clone(preview.conn); preview=deepMerge(defaultConfig(),Object.assign({},p.config,{conn:keepConn}));
     // ensure element ids exist
     (preview.elements||[]).forEach(e=>{ if(!e.id)e.id=uid(); });
@@ -2450,7 +2725,11 @@ if(!isOutput){
   const ro1=new ResizeObserver(()=>pvStage.setScale(fitScaler(pvScaler,pvMon))); ro1.observe(pvMon); pvStage.setScale(fitScaler(pvScaler,pvMon));
   const ro2=new ResizeObserver(()=>fitScaler(pgScaler,pgMon)); ro2.observe(pgMon); fitScaler(pgScaler,pgMon);
   startConsolePP();
-  setView(localStorage.getItem(LS_VIEW)||"builder");
+  // lsSet writes JSON, so the stored value is `"simple"` WITH quotes. Reading it raw
+  // never matched, so the operator's view choice silently reset to Builder on every
+  // launch. Parse it, and still accept a legacy unquoted value.
+  setView((function(){ try{ const r=localStorage.getItem(LS_VIEW); if(!r)return "builder";
+    try{ return JSON.parse(r); }catch(e){ return r; } }catch(e){ return "builder"; } })());
   updateTakeState();
   setTimeout(()=>{ if(!liveMode){ pvStage.setLive(SAMPLE1); setTally(pvMonTally,true); } },300);
 }

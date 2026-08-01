@@ -41,6 +41,9 @@ function ok(name,cond){ console.log((cond?'PASS':'**FAIL**')+'  '+name); cond?pa
   const urlIn=inputByPH('image or mp4');
   ok('media URL field present', !!urlIn);
   urlIn.value="https://example.com/back.jpg"; urlIn.dispatchEvent(new W.Event('input',{bubbles:true}));
+  // The panel now rebuilds on COMMIT (change = blur/Enter), not on every keystroke —
+  // re-rendering per keystroke destroyed the field being typed into.
+  urlIn.dispatchEvent(new W.Event('change',{bubbles:true}));
   await sleep(20);
   const mediaImg=D.querySelector('.lt-media img');
   ok('media <img> rendered in preview', !!mediaImg && /back\.jpg/.test(mediaImg.getAttribute('src')||''));

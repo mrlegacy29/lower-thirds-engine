@@ -44,7 +44,16 @@ let pass=0,fail=0; const ok=(n,c)=>{console.log((c?'PASS':'**FAIL**')+'  '+n);c?
   click(vbtn('builder')); await sleep(10);
   const saveBtn=btnByText(/Save preview as preset/);
   ok('found "Save preview as preset" button', !!saveBtn);
-  click(saveBtn); await sleep(20);            // prompt() -> "Test Look"
+  click(saveBtn); await sleep(20);
+  // in-page naming dialog (Electron has no window.prompt)
+  {
+    const ask=D.querySelector('.lt-ask');
+    ok('naming dialog opened', !!ask);
+    if(ask){ const i=ask.querySelector('input');
+      if(i){ i.value='Test Look'; i.dispatchEvent(new W.Event('input',{bubbles:true})); }
+      const okb=ask.querySelector('[data-ask="ok"]'); if(okb)click(okb); }
+  }
+  await sleep(30);
   click(vbtn('showcaller')); await sleep(20);
   ok('saved look appears as a tile in Operator', !!tileByName('Test Look'));
 
