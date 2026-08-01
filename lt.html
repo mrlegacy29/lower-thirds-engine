@@ -584,10 +584,77 @@ function createElement(type){
   return base;
 }
 
+/* ==================================================================== THEME
+   Brand tokens. Any style colour or font may hold a token reference like
+   "@accent" instead of a literal, so changing the token restyles every element
+   that points at it — one place to rebrand the whole package.
+
+   Literals still work exactly as before, so nothing existing has to migrate:
+   resolveTok() passes through anything that isn't a "@name" reference. */
+const THEME_COLOR_KEYS=["accent","ink","muted","panel"];
+const THEME_FONT_KEYS=["display","body"];
+function defaultTheme(){
+  return {
+    accent:"#c9a24b",     // gold — bars, references, labels
+    ink:"#ffffff",        // primary text
+    muted:"#c9d4e6",      // secondary text
+    panel:"#0b1220",      // chip / panel fills
+    display:"'Oswald',sans-serif",
+    body:"Georgia,serif"
+  };
+}
+function resolveTok(v,theme){
+  if(typeof v!=="string"||v.charAt(0)!=="@")return v;
+  const k=v.slice(1);
+  if(theme&&theme[k]!=null)return theme[k];
+  const d=defaultTheme();
+  return d[k]!=null?d[k]:v;      // unknown token -> fall back to the shipped default
+}
+// The active theme for the render currently in flight. Each stage stamps this at
+// the top of its renderAll(), which is synchronous, so the two console monitors
+// (preview vs program) can hold different themes without threading a theme
+// argument through every style call.
+let CUR_THEME=defaultTheme();
+function setCurTheme(t){ CUR_THEME=Object.assign(defaultTheme(),t||{}); }
+function tok(v){ return resolveTok(v,CUR_THEME); }
+
+/* ================================================================== RULES
+   "While the live slide matches ___, show/hide ___."
+
+   A rule takes FULL control of its target while it is enabled: when the pattern
+   matches the target follows the action, and when it doesn't the target does the
+   opposite. Half-control ("show on match, otherwise behave normally") sounds
+   friendlier but is useless in practice — the element would just sit on air the
+   whole time, because its own content still exists.
+
+   On a cleared slide every rule releases its target back to normal visibility,
+   so a rule can never pin something on air after Clear All.
+
+   Returns { elementId: true|false } — an override map consulted by activeBase(). */
+function evalRules(rules,ctx){
+  const out={};
+  ctx=ctx||{};
+  if(ctx.cleared) return out;                 // cleared -> no rule holds anything on air
+  const text=String(ctx.text||""), ref=String(ctx.ref||"");
+  (Array.isArray(rules)?rules:[]).forEach(r=>{
+    if(!r||r.enabled===false||!r.target)return;
+    const hay=(r.on==="ref")?ref:text;
+    let hit=false;
+    if(r.match==="any") hit=true;
+    else if(r.match==="regex"){ try{ hit=new RegExp(String(r.pattern||""),"i").test(hay); }catch(e){ hit=false; } }
+    else { const p=String(r.pattern||""); hit=p!=="" && hay.toLowerCase().indexOf(p.toLowerCase())>=0; }
+    const wantShow=(r.act!=="hide");
+    out[r.target]=hit?wantShow:!wantShow;
+  });
+  return out;
+}
+
 function defaultConfig(){
   return {
     conn:{host:"",port:1025,pollMs:200,clearRule:"pres",clearLayer:"media"},
     out:{bg:"transparent",safe:false},
+    theme:defaultTheme(),
+    rules:[],
     elements:[ createElement("scripture"), createElement("history") ]
   };
 }
@@ -1078,9 +1145,11 @@ function makeElRenderer(){
   }
   function applyLayout(d){ setLayout(d.layout,false); }   // instant (used while dragging in preview)
   function applyZ(z){ root.style.zIndex=String(z||0); }
+  // fill1/fill2 may be brand tokens, so resolve before the alpha maths
   function bg(b){ if(b.style==="minimal")return "transparent";
-    if(!b.useGrad)return hexA(b.fill1,b.opacity);
-    return `linear-gradient(${b.gradAngle}deg,${hexA(b.fill1,b.opacity)},${hexA(b.fill2,b.opacity)})`; }
+    const f1=tok(b.fill1), f2=tok(b.fill2);
+    if(!b.useGrad)return hexA(f1,b.opacity);
+    return `linear-gradient(${b.gradAngle}deg,${hexA(f1,b.opacity)},${hexA(f2,b.opacity)})`; }
   function setMedia(b){
     const src=b.mediaSrc||"";
     if(!src){ if(mediaEl){mediaEl.remove();mediaEl=null;mediaKind="";} media.style.display="none"; media.style.backgroundImage="none"; return; }
@@ -1141,8 +1210,10 @@ function makeElRenderer(){
     return "none";
   }
   function typeCss(node,s){ if(!s)return;
-    node.style.fontFamily=s.font; node.style.fontSize=s.size+"px"; node.style.fontWeight=s.weight;
-    node.style.color=s.color; node.style.letterSpacing=(s.letter||0)+"px"; node.style.lineHeight=s.lh||1.2;
+    // font/colour may be a brand token ("@accent", "@display") — resolve against the
+    // theme stamped by the stage for this render. Literals pass straight through.
+    node.style.fontFamily=tok(s.font); node.style.fontSize=s.size+"px"; node.style.fontWeight=s.weight;
+    node.style.color=tok(s.color); node.style.letterSpacing=(s.letter||0)+"px"; node.style.lineHeight=s.lh||1.2;
     node.style.textTransform=s.upper?"uppercase":"none"; node.style.fontStyle=s.italic?"italic":"normal";
     if(s.maxLines&&s.maxLines>0){node.classList.add("clamp");node.style.webkitLineClamp=String(s.maxLines);}
     else {node.classList.remove("clamp");node.style.webkitLineClamp="";} }
@@ -1300,9 +1371,10 @@ function makeElRenderer(){
   function buildChip(){ const chip=el("div",{class:"h-chip"});
     chip.append(el("span",{class:"bar"}),el("span",{class:"tx"})); return chip; }
   function styleChip(node,ref,d,newest,st){
-    node.style.background=d.chipBg||"#0b1220cc"; node.style.padding=".3em .6em";
+    node.style.background=tok(d.chipBg)||"#0b1220cc"; node.style.padding=".3em .6em";
     const bar=node.querySelector(".bar"),tx=node.querySelector(".tx");
-    bar.style.background=newest?(d.accentColor||"#c9a24b"):hexA((d.accentColor||"#c9a24b"),.5);
+    const acc=tok(d.accentColor)||"#c9a24b";
+    bar.style.background=newest?acc:hexA(acc,.5);
     tx.textContent=ref; const sty=Object.assign({},st.item); if(newest)sty.weight="700"; typeCss(tx,sty);
   }
   function chipIn(node,mode,dur,ease,d){
@@ -1453,6 +1525,7 @@ function createStage(scaler,opts){
   opts=opts||{}; const interactive=!!opts.interactive;
   const renderers=new Map(); let cfg=null; let selectedId=null;
   let live=null;   // {ref,body,translation,rawText} or null
+  let ruleState={};// {elementId:bool} from evalRules() — automation overrides
   let timers=[];   // live ProPresenter timer objects, for clock elements in "pptimer" mode
   let history=[];
   let onChange=opts.onChange||null, onSelect=opts.onSelect||null;
@@ -1504,6 +1577,9 @@ function createStage(scaler,opts){
   function byId(id){ return (cfg&&cfg.elements||[]).find(e=>e&&e.id===id)||null; }
   function activeBase(d){
     if(!d || d.visible===false) return false;
+    // A rule takes precedence over the element's own visibility mode, but NOT over
+    // the operator's eye toggle above — hiding something by hand must always win.
+    if(ruleState && Object.prototype.hasOwnProperty.call(ruleState,d.id)) return !!ruleState[d.id];
     if(d.vis==="always") return true;
     if(d.vis==="linked") return null;        // resolve through target
     return contentFor(d)!==null;
@@ -1528,6 +1604,7 @@ function createStage(scaler,opts){
 
   function renderAll(){
     if(!cfg) return;
+    setCurTheme(cfg.theme);   // this stage's brand tokens, for the whole synchronous pass
     const els=(cfg.elements||[]).filter(Boolean);
     const state=new Map();
     els.forEach(d=>state.set(d.id,{active:resolveActive(d,new Set()),layout:effLayout(d)}));
@@ -1561,7 +1638,13 @@ function createStage(scaler,opts){
     for(const [id,r] of renderers){ if(!ids.has(id)){ r.destroy(); renderers.delete(id); } }
     renderAll();
   }
-  function setLive(d){ live=d; renderAll(); }
+  function setLive(d){
+    live=d;
+    // Recompute automation from the same slide that just landed, so a rule flips its
+    // target in the SAME render — not one slide late.
+    ruleState=evalRules(cfg&&cfg.rules, d?{text:d.rawText||d.body||"",ref:d.ref||"",cleared:false}:{cleared:true});
+    renderAll();
+  }
   function setTimers(list){ timers=Array.isArray(list)?list:[]; if(hasClock())renderAll(); }
   function setHistory(arr){ history=arr.slice(); renderAll(); }
 
@@ -1863,6 +1946,8 @@ if(!isOutput){
     const s=selected();
     if(s){ selectedId=s.id; pvStage.select(s.id); panels.append(secInspector(s)); }
     panels.append(secConnection());
+    panels.append(secRules());
+    panels.append(secTheme());
     panels.append(secOutput());
     panels.append(secPresets());
   }
@@ -2374,6 +2459,127 @@ if(!isOutput){
   }
   function statLine(label,id,val){ return el("div",{class:"row",style:"justify-content:space-between;font-family:var(--mono);font-size:12px;color:var(--muted)"},
     [el("span",{text:label}),el("b",{id:id,text:val,style:"color:var(--ink)"})]); }
+
+  /* ---- automation rules ----
+     "While the live slide matches ___, show/hide ___." A rule takes full control
+     of its target while enabled, and every rule releases its target on a clear. */
+  function rulesOf(){ if(!Array.isArray(preview.rules))preview.rules=[]; return preview.rules; }
+  function secRules(){
+    const rules=rulesOf();
+    const targets=(preview.elements||[]).filter(Boolean).map(e=>[e.id,e.name||TYPE_LABELS[e.type]||e.type]);
+    const wrap=el("div");
+
+    if(!rules.length) wrap.append(el("div",{class:"empty",text:"No rules. Add one to switch elements automatically as slides change."}));
+
+    rules.forEach((r,i)=>{
+      const card=el("div",{class:"grp",style:"padding:8px 10px"});
+      const head=el("div",{class:"row",style:"justify-content:space-between;align-items:center;gap:8px"});
+      const onOff=el("input",{type:"checkbox"}); onOff.checked=r.enabled!==false;
+      onOff.onchange=()=>{r.enabled=onOff.checked;applyPreview();};
+      const lbl=el("label",{style:"display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"});
+      lbl.append(onOff,document.createTextNode("Rule "+(i+1)));
+      head.append(lbl,iconBtn("trash","Delete rule",()=>{rules.splice(i,1);applyPreview();renderPanels();},"danger"));
+      card.append(head);
+
+      card.append(rowSelect("When the live",r.on||"text",[["text","Slide text"],["ref","Scripture reference"]],
+        (v)=>{r.on=v;applyPreview();}));
+      card.append(rowSelect("…",r.match||"contains",[["contains","contains"],["regex","matches (regex)"],["any","is anything (always on)"]],
+        (v)=>{r.match=v;applyPreview();renderPanels();}));
+      if((r.match||"contains")!=="any")
+        card.append(rowText("Pattern",r.pattern,(v)=>{r.pattern=v;applyPreview();},
+          (r.match==="regex")?"e.g. ^Announcements":"e.g. Welcome"));
+      card.append(rowSelect("Then",r.act||"show",[["show","SHOW this element"],["hide","HIDE this element"]],
+        (v)=>{r.act=v;applyPreview();}));
+      if(targets.length)
+        card.append(rowSelect("Element",r.target||targets[0][0],targets,(v)=>{r.target=v;applyPreview();}));
+      else
+        card.append(el("p",{class:"hint",text:"Add an element first — a rule needs something to control."}));
+
+      const t=(targets.find(x=>x[0]===r.target)||[])[1];
+      card.append(el("p",{class:"hint",html:"While the "+( (r.on==="ref")?"reference":"slide text")+" "+
+        ((r.match==="any")?"is anything":((r.match==="regex")?"matches ":"contains ")+"<b>"+escapeHtml(r.pattern||"…")+"</b>")+
+        ", <b>"+((r.act==="hide")?"hide":"show")+"</b> "+escapeHtml(t||"(pick an element)")+
+        " — and do the opposite when it doesn't."}));
+      wrap.append(card);
+    });
+
+    const add=el("div",{class:"row"},[
+      el("button",{class:"btn sm full",html:svg("plus")+" Add rule",onclick:()=>{
+        rules.push({id:uid(),enabled:true,on:"text",match:"contains",pattern:"",act:"show",
+                    target:(preview.elements[0]||{}).id||null});
+        applyPreview();renderPanels();}})
+    ]);
+    const note=el("p",{class:"hint",html:"Rules run off the <b>live ProPresenter feed</b>, so elements switch themselves as the service moves. A rule fully controls its element while enabled, and releases it on a clear. Changes reach OBS after the next <b>TAKE</b>."});
+    return section("Automation rules",[wrap,add,note],false,"rules");
+  }
+
+  /* ---- brand theme ----
+     Tokens let one change restyle the whole package. An element style can hold
+     "@accent" / "@display" instead of a literal, and resolveTok() turns it into
+     the theme value at render time. Literals still work, so nothing has to be
+     migrated — "Apply theme to all elements" is what opts an existing look in. */
+  const THEME_FONTS=[["'Oswald','Arial Narrow',sans-serif","Oswald (condensed)"],["'Bebas Neue',sans-serif","Bebas Neue"],
+    ["'Barlow Condensed',sans-serif","Barlow Condensed"],["Georgia,'Times New Roman',serif","Georgia (serif)"],
+    ["'Helvetica Neue',Arial,sans-serif","Helvetica / Arial"],["'Libre Franklin',sans-serif","Libre Franklin"],
+    ["'Trebuchet MS',sans-serif","Trebuchet"],["Impact,sans-serif","Impact"],["Verdana,sans-serif","Verdana"]];
+
+  // Which style bucket of each type gets which token. Headline text takes the ink
+  // colour and the display face; supporting text (references, roles, labels) takes
+  // the accent. This is what makes one theme read as a coherent package.
+  const THEME_MAP={
+    scripture:{ref:{color:"@accent",font:"@display"}, body:{color:"@ink",font:"@body"}},
+    reference:{ref:{color:"@accent",font:"@display"}},
+    name:{name:{color:"@ink",font:"@display"}, title:{color:"@accent",font:"@body"}},
+    sermonTitle:{title:{color:"@ink",font:"@display"}, sub:{color:"@accent",font:"@body"}},
+    text:{text:{color:"@ink",font:"@body"}},
+    bulletList:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
+    history:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
+    eventList:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
+    clock:{label:{color:"@accent",font:"@display"}, time:{color:"@ink",font:"@display"}}
+  };
+  function applyThemeToAll(){
+    let n=0;
+    (preview.elements||[]).forEach(d=>{
+      if(!d)return;
+      const map=THEME_MAP[d.type]; if(!map)return;
+      Object.keys(map).forEach(bucket=>{
+        if(!d.style||!d.style[bucket])return;
+        Object.assign(d.style[bucket],map[bucket]); n++;
+      });
+      if(d.accentColor!==undefined) d.accentColor="@accent";
+      if(d.chipBg!==undefined) d.chipBg="@panel";
+    });
+    applyPreview(); renderPanels();
+    return n;
+  }
+  function themeOf(){ if(!preview.theme)preview.theme=defaultTheme(); return preview.theme; }
+
+  function secTheme(){
+    const th=themeOf();
+    const colorRow=(key,label,hint)=>el("div",null,[
+      rowColor(label,resolveTok("@"+key,th),(v)=>{th[key]=v;applyPreview();}),
+      hint?el("p",{class:"hint",text:hint}):null
+    ]);
+    return section("Brand theme",[
+      el("p",{class:"hint",html:"Set your brand once. Any element style can point at a token (<b>@accent</b>, <b>@ink</b>, <b>@display</b>…) instead of a fixed value, so changing it here restyles everything that uses it."}),
+      colorRow("accent","Accent","References, role labels, bars — the brand colour."),
+      colorRow("ink","Text","Primary text: verse bodies, names, titles."),
+      colorRow("muted","Muted","Secondary text."),
+      colorRow("panel","Panel fill","Chip and panel backgrounds."),
+      rowSelect("Display font",th.display,THEME_FONTS,(v)=>{th.display=v;applyPreview();}),
+      rowSelect("Body font",th.body,THEME_FONTS,(v)=>{th.body=v;applyPreview();}),
+      el("div",{class:"row"},[
+        el("button",{class:"btn primary full",text:"Apply theme to all elements",
+          title:"Repoint every element's colours and fonts at the tokens above",
+          onclick:()=>{ if(confirm("Repoint every element's colours and fonts at the theme tokens?\n\nThis overwrites per-element colour/font choices in Preview. Your presets are untouched, and nothing reaches air until you press TAKE."))
+            { const n=applyThemeToAll(); alert("Themed "+n+" style group"+(n===1?"":"s")+".\n\nPress TAKE to send it live."); } }})
+      ]),
+      el("div",{class:"row"},[
+        el("button",{class:"btn sm full",text:"Reset theme to defaults",
+          onclick:()=>{ preview.theme=defaultTheme(); applyPreview(); renderPanels(); }})
+      ])
+    ],false,"theme");
+  }
 
   /* ---- output ---- */
   function secOutput(){

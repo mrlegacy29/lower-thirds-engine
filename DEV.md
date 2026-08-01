@@ -2,7 +2,7 @@
 
 All suites run under **jsdom** (no browser) and load `lt.html` from
 `../lt.html`. `npm test` runs `test/run-all.js`, which first syntax-checks the
-single-file app, then runs all 19 suites and aggregates pass/fail.
+single-file app, then runs all 20 suites and aggregates pass/fail.
 
 ## Conventions that matter (jsdom quirks)
 
@@ -52,6 +52,7 @@ single-file app, then runs all 19 suites and aggregates pass/fail.
 | `relay_security_test` | the relay's origin policy: cross-origin and sandboxed-iframe writes to `/config` refused, `/pp` not an open proxy, no wildcard CORS, honest 400 on bad JSON |
 | `graphics_io_test` | graphics import/export: every malformed file is refused **without writing anything** (incl. the `folders`-isn't-a-list bricking case), imported elements are rebuilt from known-good defaults, ids re-issued, visWith/dock.to remapped or dropped |
 | `clock_test` | Timer/clock element: duration + wall-clock formatting, countdown-to-a-time (incl. rolling past midnight), the permissive ProPresenter timer payload parser, and live rendering |
+| `theme_rules_test` | brand tokens resolve at render (and literals stay literal — a theme-only change restyles the element), plus the rules engine: full control, release-on-clear, invalid regex, ref-vs-text |
 
 ## The source-fallback rule (read before touching `setText` / `marqText`)
 
