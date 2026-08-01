@@ -569,6 +569,14 @@ function createElement(type){
     base.content={};
     base.box=boxDefaults({style:"minimal",useGrad:false,opacity:0,accent:false,shadow:false,blur:0,padX:0,padY:0,radius:8,
       mediaFit:"contain"});
+  } else if(type==="qr"){
+    // Encoded live from whatever is in `text`, so a giving link can be changed on the
+    // fly (and can carry a {{variable}} — see applyVars).
+    base.name="QR code"; base.layout={x:1520,y:640,w:300,h:380};
+    base.source={kind:"manual"};
+    base.content={text:"https://",label:"SCAN TO GIVE",fg:"#000000",bg:"#ffffff",quiet:4,plate:true};
+    base.style={ label:styleDefaults({font:"'Oswald',sans-serif",size:26,weight:"700",color:"#ffffff",upper:true,letter:2}) };
+    base.box=boxDefaults({style:"minimal",useGrad:false,opacity:0,accent:false,shadow:false,padX:0,padY:0});
   } else if(type==="clock"){
     // Three modes. "pptimer" is the one nothing else in this category can do: it
     // MIRRORS a live ProPresenter timer, so the countdown on air is the same clock
@@ -618,6 +626,321 @@ let CUR_THEME=defaultTheme();
 function setCurTheme(t){ CUR_THEME=Object.assign(defaultTheme(),t||{}); }
 function tok(v){ return resolveTok(v,CUR_THEME); }
 
+/* ============================================================== LIVE DATA
+   Any operator-typed text may contain {{name}} placeholders, filled from bound
+   sources (a Google Sheet published as CSV, a JSON endpoint, a plain text file).
+   That composes with everything: a QR link, a clock label, a bullet list, a
+   manual verse — all just text.
+
+   An UNKNOWN placeholder is left verbatim rather than blanked, so a source that
+   fails mid-service shows "{{offering}}" on air instead of an empty box. That is
+   ugly on purpose: silence would look intentional and could go unnoticed. */
+function applyVars(s,vars){
+  if(typeof s!=="string"||s.indexOf("{{")<0)return s;
+  return s.replace(/\{\{\s*([\w.\- ]+?)\s*\}\}/g,(m,k)=>{
+    const v=vars?vars[k]:undefined;
+    return (v==null||v==="")?m:String(v);
+  });
+}
+let CUR_VARS={};
+function setCurVars(v){ CUR_VARS=(v&&typeof v==="object")?v:{}; }
+// shallow-deep copy with every string run through applyVars
+function subVars(o,vars){
+  vars=vars||CUR_VARS;
+  if(o==null)return o;
+  if(typeof o==="string")return applyVars(o,vars);
+  if(Array.isArray(o))return o.map(x=>subVars(x,vars));
+  if(typeof o==="object"){ const out={}; for(const k in o)out[k]=subVars(o[k],vars); return out; }
+  return o;
+}
+// Pull named values out of a fetched body. Deliberately forgiving about shape —
+// a bound source is usually somebody's spreadsheet, not a designed API.
+function parseDataSource(kind,body,pick,layout){
+  const vars={};
+  const txt=String(body==null?"":body);
+  try{
+    if(kind==="json"){
+      const j=JSON.parse(txt);
+      const root=(pick?pick.split(".").reduce((a,k)=>(a==null?a:a[k]),j):j);
+      if(root&&typeof root==="object"&&!Array.isArray(root)){ for(const k in root){ const v=root[k]; if(v==null||typeof v==="object")continue; vars[k]=String(v); } }
+      else if(root!=null&&typeof root!=="object")vars.value=String(root);
+    } else if(kind==="csv"){
+      // Two shapes, and they are genuinely AMBIGUOUS for a two-column sheet:
+      //   offering,$12450      -> name,value rows
+      //   offering,attendance  -> a header row, values on the next row
+      //   $999,42
+      // No heuristic can tell those apart, so `layout` is an explicit operator choice.
+      // The default only guesses where it is safe: exactly two columns is
+      // overwhelmingly a name/value sheet, wider is a table.
+      const rows=txt.replace(/\r/g,"").split("\n").map(l=>l.trim()).filter(Boolean).map(l=>splitCsv(l));
+      if(!rows.length)return vars;
+      const mode=layout||((rows[0].length===2)?"pairs":"table");
+      if(mode==="pairs"){
+        rows.forEach(r=>{ if(r[0])vars[r[0]]=(r[1]==null?"":r[1]); });
+      } else if(rows.length>=2){
+        rows[0].forEach((h,i)=>{ if(h)vars[h]=(rows[1][i]==null?"":rows[1][i]); });
+      } else {
+        rows[0].forEach((c,i)=>{ vars["col"+(i+1)]=c; });
+      }
+    } else {
+      vars.value=txt.trim().slice(0,500);
+    }
+  }catch(e){ /* a malformed source contributes nothing rather than throwing */ }
+  return vars;
+}
+function splitCsv(line){
+  const out=[]; let cur="",q=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(q){ if(ch==='"'){ if(line[i+1]==='"'){cur+='"';i++;} else q=false; } else cur+=ch; }
+    else if(ch==='"')q=true;
+    else if(ch===","){ out.push(cur.trim()); cur=""; }
+    else cur+=ch;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+/* ================================================================= QR CODE
+   Self-contained QR encoder — byte mode, error-correction level M, versions
+   1-10 (up to 216 bytes, far more than a giving URL needs). No dependency, so
+   lt.html stays a single file that runs anywhere.
+
+   Level M ("~15% recoverable") is the right default for a screen: high enough
+   that a camera at the back of a room still reads it, low enough that the code
+   stays coarse and scannable rather than dense.
+
+   Verified by round-tripping through an INDEPENDENT decoder in
+   test/qr_test.js — a shared misreading of the spec would have to break both
+   the encoder and the decoder in the same direction to slip through. The
+   Reed-Solomon stage is additionally pinned with known-answer tests.        */
+const QR_ECC="M";
+// [ecc codewords per block, blocks in group 1, data cw per block G1, blocks G2, data cw G2]
+const QR_SPECS={
+  1:[10,1,16,0,0],  2:[16,1,28,0,0],  3:[26,1,44,0,0],  4:[18,2,32,0,0],  5:[24,2,43,0,0],
+  6:[16,4,27,0,0],  7:[18,4,31,0,0],  8:[22,2,38,2,39], 9:[22,3,36,2,37], 10:[26,4,43,1,44]
+};
+const QR_ALIGN={1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50]};
+const QR_MAXV=10;
+
+/* ---- GF(256), primitive polynomial 0x11D ---- */
+const QR_EXP=new Uint8Array(512), QR_LOG=new Uint8Array(256);
+(function(){ let x=1;
+  for(let i=0;i<255;i++){ QR_EXP[i]=x; QR_LOG[x]=i; x<<=1; if(x&0x100)x^=0x11D; }
+  for(let i=255;i<512;i++)QR_EXP[i]=QR_EXP[i-255];
+})();
+function qrMul(a,b){ return (a===0||b===0)?0:QR_EXP[QR_LOG[a]+QR_LOG[b]]; }
+// generator polynomial of degree n
+function qrGenPoly(n){
+  let p=[1];
+  for(let i=0;i<n;i++){
+    const q=new Array(p.length+1).fill(0);
+    for(let j=0;j<p.length;j++){ q[j]^=qrMul(p[j],1); q[j+1]^=qrMul(p[j],QR_EXP[i]); }
+    p=q;
+  }
+  return p;
+}
+function qrEcc(data,n){
+  const gen=qrGenPoly(n), res=new Array(data.length+n).fill(0);
+  for(let i=0;i<data.length;i++)res[i]=data[i];
+  for(let i=0;i<data.length;i++){
+    const f=res[i]; if(f===0)continue;
+    for(let j=0;j<gen.length;j++)res[i+j]^=qrMul(gen[j],f);
+  }
+  return res.slice(data.length);
+}
+
+/* ---- BCH check bits (format and version information) ---- */
+function qrFormatBits(maskIdx){
+  // ECC level M = 0b00; 5 data bits = level(2) + mask(3)
+  const data=(0b00<<3)|maskIdx;
+  let rem=data;
+  for(let i=0;i<10;i++){ rem=(rem<<1); if(rem&(1<<10))rem^=0b10100110111; }
+  return (((data<<10)|rem)^0b101010000010010);
+}
+function qrVersionBits(v){
+  let rem=v;
+  for(let i=0;i<12;i++){ rem=(rem<<1); if(rem&(1<<12))rem^=0b1111100100101; }
+  return (v<<12)|rem;
+}
+
+/* ---- encode a string to a boolean module matrix ---- */
+function qrEncode(text){
+  const bytes=[];
+  // UTF-8; readers handle it in byte mode
+  const s=unescape(encodeURIComponent(String(text==null?"":text)));
+  for(let i=0;i<s.length;i++)bytes.push(s.charCodeAt(i)&0xFF);
+
+  // smallest version that fits
+  let ver=0;
+  for(let v=1;v<=QR_MAXV;v++){
+    const sp=QR_SPECS[v], cap=sp[1]*sp[2]+sp[3]*sp[4];
+    const cciBits=(v<=9)?8:16;
+    if(bytes.length + Math.ceil((4+cciBits)/8) <= cap){ ver=v; break; }
+  }
+  if(!ver) return null;                       // too long for version 10 at level M
+
+  const sp=QR_SPECS[ver], totalData=sp[1]*sp[2]+sp[3]*sp[4];
+  const cciBits=(ver<=9)?8:16;
+
+  /* bit stream */
+  const bits=[];
+  const put=(val,n)=>{ for(let i=n-1;i>=0;i--)bits.push((val>>i)&1); };
+  put(0b0100,4); put(bytes.length,cciBits);
+  bytes.forEach(b=>put(b,8));
+  const capBits=totalData*8;
+  for(let i=0;i<4&&bits.length<capBits;i++)bits.push(0);      // terminator
+  while(bits.length%8)bits.push(0);
+  const dataCw=[];
+  for(let i=0;i<bits.length;i+=8){ let b=0; for(let j=0;j<8;j++)b=(b<<1)|bits[i+j]; dataCw.push(b); }
+  const PADS=[0xEC,0x11];
+  for(let i=0;dataCw.length<totalData;i++)dataCw.push(PADS[i%2]);
+
+  /* split into blocks, ECC each, then interleave */
+  const blocks=[],eccs=[];
+  let p=0;
+  for(let i=0;i<sp[1];i++){ blocks.push(dataCw.slice(p,p+sp[2])); p+=sp[2]; }
+  for(let i=0;i<sp[3];i++){ blocks.push(dataCw.slice(p,p+sp[4])); p+=sp[4]; }
+  blocks.forEach(b=>eccs.push(qrEcc(b,sp[0])));
+  const finalCw=[];
+  const maxData=Math.max(sp[2],sp[4]||0);
+  for(let i=0;i<maxData;i++)blocks.forEach(b=>{ if(i<b.length)finalCw.push(b[i]); });
+  for(let i=0;i<sp[0];i++)eccs.forEach(e=>finalCw.push(e[i]));
+
+  /* matrix */
+  const size=17+4*ver;
+  const m=[],res=[];                                   // res = reserved (function patterns)
+  for(let i=0;i<size;i++){ m.push(new Array(size).fill(false)); res.push(new Array(size).fill(false)); }
+  const setF=(r,c,v)=>{ if(r<0||c<0||r>=size||c>=size)return; m[r][c]=v; res[r][c]=true; };
+
+  // finder + separators
+  const finder=(R,C)=>{
+    for(let r=-1;r<=7;r++)for(let c=-1;c<=7;c++){
+      const rr=R+r, cc=C+c; if(rr<0||cc<0||rr>=size||cc>=size)continue;
+      const on=(r>=0&&r<=6&&(c===0||c===6))||(c>=0&&c<=6&&(r===0||r===6))||(r>=2&&r<=4&&c>=2&&c<=4);
+      setF(rr,cc,on);
+    }
+  };
+  finder(0,0); finder(0,size-7); finder(size-7,0);
+  // timing
+  for(let i=8;i<size-8;i++){ setF(6,i,i%2===0); setF(i,6,i%2===0); }
+  // alignment
+  const al=QR_ALIGN[ver];
+  al.forEach(r=>al.forEach(c=>{
+    if((r<=8&&c<=8)||(r<=8&&c>=size-9)||(r>=size-9&&c<=8))return;   // skip finder corners
+    for(let dr=-2;dr<=2;dr++)for(let dc=-2;dc<=2;dc++)
+      setF(r+dr,c+dc, Math.max(Math.abs(dr),Math.abs(dc))!==1);
+  }));
+  // dark module + reserve format areas
+  setF(size-8,8,true);
+  for(let i=0;i<9;i++){ if(!res[8][i])setF(8,i,false); if(!res[i][8])setF(i,8,false); }
+  for(let i=0;i<8;i++){ if(!res[8][size-1-i])setF(8,size-1-i,false); if(!res[size-1-i][8])setF(size-1-i,8,false); }
+  // version info (v7+)
+  if(ver>=7){
+    const vb=qrVersionBits(ver);
+    for(let i=0;i<18;i++){ const b=((vb>>i)&1)===1; const r=Math.floor(i/3), c=i%3;
+      setF(size-11+c,r,b); setF(r,size-11+c,b); }
+  }
+
+  /* data placement — zigzag upward/downward in 2-column strips, skipping col 6 */
+  let bi=0; const bitAt=(i)=> (i<finalCw.length*8) ? ((finalCw[i>>3]>>(7-(i&7)))&1)===1 : false;
+  let up=true;
+  for(let c=size-1;c>0;c-=2){
+    if(c===6)c--;                                     // the vertical timing column
+    for(let n=0;n<size;n++){
+      const r=up?(size-1-n):n;
+      for(let k=0;k<2;k++){
+        const cc=c-k;
+        if(res[r][cc])continue;
+        m[r][cc]=bitAt(bi++);
+      }
+    }
+    up=!up;
+  }
+
+  /* pick the mask with the lowest penalty */
+  const maskFn=[
+    (r,c)=>((r+c)%2===0),        (r,c)=>(r%2===0),           (r,c)=>(c%3===0),
+    (r,c)=>((r+c)%3===0),        (r,c)=>((Math.floor(r/2)+Math.floor(c/3))%2===0),
+    (r,c)=>(((r*c)%2)+((r*c)%3)===0), (r,c)=>((((r*c)%2)+((r*c)%3))%2===0),
+    (r,c)=>((((r+c)%2)+((r*c)%3))%2===0)
+  ];
+  let best=null,bestScore=Infinity;
+  for(let k=0;k<8;k++){
+    const t=m.map(row=>row.slice());
+    for(let r=0;r<size;r++)for(let c=0;c<size;c++)
+      if(!res[r][c]&&maskFn[k](r,c))t[r][c]=!t[r][c];
+    // format info for this mask
+    const fb=qrFormatBits(k);
+    for(let i=0;i<15;i++){
+      const b=((fb>>i)&1)===1;
+      // copy 1 (around the top-left finder)
+      if(i<6)t[8][i]=b; else if(i===6)t[8][7]=b; else if(i===7)t[8][8]=b;
+      else if(i===8)t[7][8]=b; else t[14-i][8]=b;
+      // copy 2: SEVEN modules up column 8 (rows size-1 .. size-7), then EIGHT along
+      // row 8 (cols size-8 .. size-1). Taking eight down the column instead of seven
+      // overwrites the dark module at (size-8, 8), which is a fixed always-on module.
+      if(i<7)t[size-1-i][8]=b; else t[8][size-15+i]=b;
+    }
+    const sc=qrPenalty(t,size);
+    if(sc<bestScore){ bestScore=sc; best=t; }
+  }
+  return {size,modules:best,version:ver};
+}
+
+/* ---- mask penalty (ISO/IEC 18004 rules 1-4) ---- */
+function qrPenalty(m,size){
+  let p=0;
+  const run=(get)=>{
+    for(let a=0;a<size;a++){
+      let last=null,len=0;
+      for(let b=0;b<size;b++){
+        const v=get(a,b);
+        if(v===last)len++; else {last=v;len=1;}
+        if(len===5)p+=3; else if(len>5)p+=1;
+      }
+    }
+  };
+  run((r,c)=>m[r][c]); run((c,r)=>m[r][c]);                       // rule 1
+  for(let r=0;r<size-1;r++)for(let c=0;c<size-1;c++)             // rule 2
+    if(m[r][c]===m[r][c+1]&&m[r][c]===m[r+1][c]&&m[r][c]===m[r+1][c+1])p+=3;
+  const pat=[true,false,true,true,true,false,true,false,false,false,false];
+  const hit=(get,a,b)=>{ for(let i=0;i<11;i++){ if(b+i>=size)return false; if(get(a,b+i)!==pat[i])return false; } return true; };
+  const hitR=(get,a,b)=>{ for(let i=0;i<11;i++){ if(b+i>=size)return false; if(get(a,b+i)!==pat[10-i])return false; } return true; };
+  for(let a=0;a<size;a++)for(let b=0;b<size;b++){                 // rule 3
+    if(hit((x,y)=>m[x][y],a,b)||hitR((x,y)=>m[x][y],a,b))p+=40;
+    if(hit((x,y)=>m[y][x],a,b)||hitR((x,y)=>m[y][x],a,b))p+=40;
+  }
+  let dark=0; for(let r=0;r<size;r++)for(let c=0;c<size;c++)if(m[r][c])dark++;
+  const pct=dark*100/(size*size);
+  p+=Math.floor(Math.abs(pct-50)/5)*10;                           // rule 4
+  return p;
+}
+
+/* ---- render to a crisp SVG path (scales to any size with no blur) ---- */
+// Only a literal colour may reach the generated markup. The rest of the SVG is
+// machine-generated path data, so this is the single place operator/config text
+// could otherwise be interpolated into markup.
+function qrColor(v,fb){
+  const s=String(v==null?"":v).trim();
+  return /^#[0-9a-f]{3,8}$/i.test(s)||/^rgba?\([\d.,\s%]+\)$/i.test(s) ? s : fb;
+}
+function qrSvg(text,opts){
+  opts=opts||{};
+  const q=qrEncode(text);
+  if(!q)return null;
+  const quiet=(opts.quiet==null?4:opts.quiet);                    // spec minimum is 4 modules
+  const total=q.size+quiet*2;
+  let d="";
+  for(let r=0;r<q.size;r++)for(let c=0;c<q.size;c++)
+    if(q.modules[r][c])d+="M"+(c+quiet)+" "+(r+quiet)+"h1v1h-1z";
+  const fg=qrColor(opts.fg,"#000000"), bg=qrColor(opts.bg,"#ffffff");
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+total+' '+total+'" '+
+         'shape-rendering="crispEdges" width="100%" height="100%">'+
+         (opts.transparent?'':'<rect width="'+total+'" height="'+total+'" fill="'+bg+'"/>')+
+         '<path d="'+d+'" fill="'+fg+'"/></svg>';
+}
+
 /* ================================================================== RULES
    "While the live slide matches ___, show/hide ___."
 
@@ -655,6 +978,9 @@ function defaultConfig(){
     out:{bg:"transparent",safe:false},
     theme:defaultTheme(),
     rules:[],
+    // Present from the start so the panel's lazy init can't make Preview differ from
+    // Program and light TAKE as "pending" the moment the section is opened.
+    data:{sources:[]},
     elements:[ createElement("scripture"), createElement("history") ]
   };
 }
@@ -668,8 +994,8 @@ function migrateClearRule(cfg){
 
 const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Sermon title",
   bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media",
-  clock:"Timer / clock"};
-const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media","clock"];
+  clock:"Timer / clock",qr:"QR code"};
+const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media","clock","qr"];
 
 /* ------------------------------------------------------------- clock helpers */
 function pad2(n){ n=Math.floor(Math.abs(n)); return (n<10?"0":"")+n; }
@@ -933,6 +1259,48 @@ function savePresets(p){lsSet(LS_PRESETS,p);}
 // served by relay over http(s); standalone over file://
 const SERVED=location.protocol!=="file:";
 function relayBase(){ return SERVED? location.origin : ("http://localhost:"+RELAY_PORT); }
+
+/* Polls bound data sources through the relay's /fetch proxy and hands back a flat
+   {name:value} map. Each source keeps its own interval, a failure never clears the
+   last good values (a blip must not blank a graphic), and everything is torn down
+   on setSources so a config change can't leak timers. */
+function createDataFeed(onVars){
+  let srcs=[],vals={},timers=[],gen=0;
+  const status={};
+  function fetchOne(s){
+    if(!s||!s.url||s.enabled===false)return Promise.resolve();
+    const u=relayBase()+"/fetch?target="+encodeURIComponent(s.url);
+    return fetch(u,{cache:"no-store"})
+      .then(r=>r.ok?r.text():Promise.reject(new Error("HTTP "+r.status)))
+      .then(t=>{
+        const got=parseDataSource(s.kind||"csv",t,s.pick,s.layout);
+        const n=Object.keys(got).length;
+        if(!n){ status[s.id]={ok:false,msg:"fetched, but no values found"}; return; }
+        Object.keys(got).forEach(k=>{
+          vals[k]=got[k];
+          if(s.name)vals[s.name+"."+k]=got[k];      // also namespaced, for collisions
+        });
+        status[s.id]={ok:true,msg:n+" value"+(n===1?"":"s")};
+        try{ onVars&&onVars(Object.assign({},vals),status); }catch(e){}
+      })
+      .catch(e=>{ status[s.id]={ok:false,msg:String((e&&e.message)||e)};
+        try{ onVars&&onVars(Object.assign({},vals),status); }catch(e2){} });
+  }
+  function stop(){ timers.forEach(t=>clearInterval(t)); timers=[]; gen++; }
+  function setSources(list){
+    stop();
+    srcs=(Array.isArray(list)?list:[]).filter(s=>s&&s.url);
+    const my=gen;
+    srcs.forEach(s=>{
+      fetchOne(s);
+      const ms=Math.max(5,Number(s.interval)||60)*1000;   // never hammer: 5s floor
+      timers.push(setInterval(()=>{ if(my===gen)fetchOne(s); },ms));
+    });
+    if(!srcs.length){ vals={}; try{ onVars&&onVars({},status); }catch(e){} }
+  }
+  return { setSources, stop, refresh(){ srcs.forEach(fetchOne); },
+           vars(){ return Object.assign({},vals); }, status(){ return status; } };
+}
 
 function createBus(){
   let onProg=null, es=null, relayOk=false, statusCb=null;
@@ -1215,14 +1583,28 @@ function makeElRenderer(){
     node.style.fontFamily=tok(s.font); node.style.fontSize=s.size+"px"; node.style.fontWeight=s.weight;
     node.style.color=tok(s.color); node.style.letterSpacing=(s.letter||0)+"px"; node.style.lineHeight=s.lh||1.2;
     node.style.textTransform=s.upper?"uppercase":"none"; node.style.fontStyle=s.italic?"italic":"normal";
-    if(s.maxLines&&s.maxLines>0){node.classList.add("clamp");node.style.webkitLineClamp=String(s.maxLines);}
-    else {node.classList.remove("clamp");node.style.webkitLineClamp="";} }
+    // .clamp needs display:-webkit-box, but setText writes an inline display:block to
+    // show/hide each node — and inline beats the class, so "Max lines" did nothing on
+    // most nodes (including the Scripture body, which ships with maxLines:3). Set the
+    // display here instead of relying on the class winning.
+    if(s.maxLines&&s.maxLines>0){
+      node.classList.add("clamp");
+      node.style.webkitLineClamp=String(s.maxLines);
+      if(node.style.display!=="none")node.style.display="-webkit-box";
+    } else {
+      node.classList.remove("clamp");
+      node.style.webkitLineClamp="";
+      if(node.style.display==="-webkit-box")node.style.display="block";
+    } }
   function esc(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
   // Scripture/Reference can be switched to "Manual" in the inspector, which stores the
   // operator's typed verse in d.content — but the live feed supplies it via `data`.
   // Return d.content ONLY for a manual element: falling back on a LIVE one would paint a
   // stale default reference next to a live verse body. Null means "no fallback allowed".
-  function manualContent(d){ return (d.source&&d.source.kind==="live")?null:(d.content||{}); }
+  // subVars fills any {{name}} placeholders from bound live data. Live-fed content is
+  // left alone — it already IS the live value, and running substitution over it would
+  // let slide text act as a template.
+  function manualContent(d){ return (d.source&&d.source.kind==="live")?null:subVars(d.content||{}); }
 
   // Name is the one type with an asymmetric rule, so both render paths (setText and the
   // ticker's marqText) share these two helpers rather than each rolling their own.
@@ -1252,6 +1634,7 @@ function makeElRenderer(){
     else if(t==="text"){ content.append(el("div",{class:"node t-text"})); }
     else if(t==="media"){ content.append(el("div",{class:"node media-hint"})); }
     else if(t==="clock"){ content.append(el("div",{class:"node k-label"}),el("div",{class:"node k-time"})); }
+    else if(t==="qr"){ content.append(el("div",{class:"node q-img"}),el("div",{class:"node q-label"})); }
     else if(t==="bulletList"){ content.append(el("div",{class:"node b-head"}),el("ul",{class:"node b-list"})); }
     else if(t==="history"||t==="eventList"){ content.append(el("div",{class:"node h-label"}),el("div",{class:"node h-items"})); }
   }
@@ -1352,6 +1735,28 @@ function makeElRenderer(){
       lab.style.display=(d.content.heading && d.showHeading!==false && (items.length>0 || interactive || (data&&data.headerHold)))?"block":"none";
       typeCss(lab,st.heading);
       renderHistChips(d,items);
+    } else if(t==="qr"){
+      const img=content.querySelector(".q-img"), lab=content.querySelector(".q-label");
+      const c=d.content||{};
+      const payload=applyVars((data&&data.qrText!=null)?data.qrText:(c.text||""),CUR_VARS);
+      const sig=payload+"|"+c.fg+"|"+c.bg+"|"+c.quiet+"|"+(c.plate!==false);
+      // Encoding is not free, so only rebuild when the payload or colours actually
+      // change — renderAll() runs on every slide and every clock tick.
+      if(img._sig!==sig){
+        img._sig=sig;
+        const svg=(payload&&payload!=="https://")?qrSvg(payload,{fg:tok(c.fg),bg:tok(c.bg),quiet:c.quiet,transparent:c.plate===false}):null;
+        img.innerHTML=svg||"";
+        if(!svg&&interactive){
+          const hint=el("div",{style:"display:flex;align-items:center;justify-content:center;height:100%;"+
+            "font-size:13px;color:#8aa;text-align:center;padding:8px"});
+          hint.append(document.createTextNode(payload?"That link is too long for a QR code (max 213 characters).":"Add a link in the inspector."));
+          img.append(hint);
+        }
+      }
+      img.style.display="block"; img.style.flex="1"; img.style.minHeight="0";
+      const lv=(c.label||"");
+      lab.textContent=lv; lab.style.display=lv?"block":"none"; lab.style.textAlign="center";
+      lab.style.marginTop="6px"; typeCss(lab,(d.style||{}).label);
     } else if(t==="clock"){
       // The value is computed upstream in contentFor() (that is where "now" and the
       // live ProPresenter timer list live) — this just paints it.
@@ -1393,7 +1798,11 @@ function makeElRenderer(){
   function renderHistChips(d,items){
     const cont=content.querySelector(".h-items"); if(!cont)return;
     const st=d.style||{}; const max=d.content.max||5;
-    let win=items.slice(-max); if(d.content.order==="new")win=win.slice().reverse();
+    // Keeping the LAST n is right for the scripture list (newest verses matter), but
+    // backwards for a manual Event list, where the running order starts at the top —
+    // it silently dropped the opening items of the service.
+    let win=(d.type==="eventList")?items.slice(0,max):items.slice(-max);
+    if(d.content.order==="new")win=win.slice().reverse();
     const mode=d.histAnim||"slide-up"; const dur=Math.max(0,d.histDur!=null?d.histDur:450);
     const ease="cubic-bezier(.22,.61,.36,1)";
     // FIRST: record current positions for FLIP
@@ -1517,7 +1926,12 @@ function makeElRenderer(){
     isVisible(){return visible;},
     setSelected(b){ root.classList.toggle("selected",!!b); },
     setInteractive(b){ interactive=!!b; root.classList.toggle("interactive",!!b); },
-    destroy(){ root.remove(); }
+    // Cancel any infinite loop animation before dropping the node. Every look change
+    // in Operator mode replaces the element set, so orphaned ticker/pulse/float
+    // animations otherwise accumulated for the whole service.
+    destroy(){
+      try{ (root.getAnimations?root.getAnimations({subtree:true}):[]).forEach(a=>{try{a.cancel();}catch(e){}}); }catch(e){}
+      root.remove(); }
   };
 }
 
@@ -1526,6 +1940,7 @@ function createStage(scaler,opts){
   const renderers=new Map(); let cfg=null; let selectedId=null;
   let live=null;   // {ref,body,translation,rawText} or null
   let ruleState={};// {elementId:bool} from evalRules() — automation overrides
+  let dataVars={}; // {name:value} from bound live-data sources
   let timers=[];   // live ProPresenter timer objects, for clock elements in "pptimer" mode
   let history=[];
   let onChange=opts.onChange||null, onSelect=opts.onSelect||null;
@@ -1537,10 +1952,22 @@ function createStage(scaler,opts){
       let items=history;
       if(d.excludeLive && live && live.ref){ items=history.slice();
         while(items.length && items[items.length-1].ref===live.ref) items.pop(); }
+      // DELIBERATELY always active. An audit flagged that an empty list with a styled
+      // background can leave a blank plate on air, but hiding the whole element here
+      // breaks the tuned Clear-Slide/Clear-All header behaviour (headerHold) — the
+      // header is already managed by setText, which is the intended mechanism.
+      // If the blank plate ever matters, style the BACKGROUND off, don't hide here.
       return {items,headerHold};
     }
     if(d.type==="eventList"){ const lines=(d.content.items||"").split("\n").map(s=>s.trim()).filter(Boolean);
       return {items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
+    if(d.type==="qr"){
+      const c=d.content||{}, payload=String(c.text||"");
+      // An unconfigured QR would otherwise composite a blank plate on air; keep it
+      // visible in the builder so it can still be positioned and styled.
+      if((!payload||payload==="https://")&&!interactive) return null;
+      return {qrText:payload};
+    }
     if(d.type==="clock"){
       const c=d.content||{}, now=new Date(), fmt=c.fmt||"h:mm";
       let text="", label=c.label||"";
@@ -1605,6 +2032,7 @@ function createStage(scaler,opts){
   function renderAll(){
     if(!cfg) return;
     setCurTheme(cfg.theme);   // this stage's brand tokens, for the whole synchronous pass
+    setCurVars(dataVars);     // and its live-data variables
     const els=(cfg.elements||[]).filter(Boolean);
     const state=new Map();
     els.forEach(d=>state.set(d.id,{active:resolveActive(d,new Set()),layout:effLayout(d)}));
@@ -1636,6 +2064,11 @@ function createStage(scaler,opts){
       r.update(d); r.setInteractive(interactive); r.setSelected(interactive&&d.id===selectedId);
     });
     for(const [id,r] of renderers){ if(!ids.has(id)){ r.destroy(); renderers.delete(id); } }
+    // Re-append in config order. Only NEW renderers were ever appended, so an existing
+    // element could not be restacked: "Move up/down" changed the list but not the DOM,
+    // and since every element defaults to layer 0 (equal z-index) paint order IS DOM
+    // order — so Preview and a freshly-loaded OBS output could stack differently.
+    (cfg.elements||[]).forEach(d=>{ if(!d)return; const r=renderers.get(d.id); if(r&&r.root)scaler.appendChild(r.root); });
     renderAll();
   }
   function setLive(d){
@@ -1646,6 +2079,7 @@ function createStage(scaler,opts){
     renderAll();
   }
   function setTimers(list){ timers=Array.isArray(list)?list:[]; if(hasClock())renderAll(); }
+  function setVars(v){ dataVars=(v&&typeof v==="object")?v:{}; renderAll(); }
   function setHistory(arr){ history=arr.slice(); renderAll(); }
 
   /* ---- clock tick ----------------------------------------------------------
@@ -1709,7 +2143,7 @@ function createStage(scaler,opts){
   function clampN(v,a,b){return Math.max(a,Math.min(b,v));}
 
   startClockTick();
-  return { setConfig,setLive,setTimers,setHistory,setHeaderHold,select,setScale,replayVisible,
+  return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,select,setScale,replayVisible,
     hasClock, stopClockTick,
     get cfg(){return cfg;}, getRenderer:(id)=>renderers.get(id) };
 }
@@ -1755,6 +2189,9 @@ if(isOutput){
   }
   function pushHist(ref){ if(!ref)return; const last=history[history.length-1]; if(last&&last.ref===ref)return; history.push({id:++histId,ref}); stage.setHistory(history); }
 
+  const dataFeed=createDataFeed((v)=>stage.setVars(v));
+  let lastDataSrc=JSON.stringify((program.data&&program.data.sources)||[]);
+  dataFeed.setSources((program.data&&program.data.sources)||[]);
   const pp=createPP({onUpdate:onSlide,onReach:()=>{},onTimers:(t)=>stage.setTimers(t)});
   // only poll PP's timers when a clock element is actually mirroring one
   const wantsPpTimers=(c)=>(c&&c.elements||[]).some(d=>d&&d.type==="clock"&&d.content&&d.content.mode==="pptimer");
@@ -1767,6 +2204,10 @@ if(isOutput){
     const connChanged=JSON.stringify(merged.conn)!==JSON.stringify(program.conn);
     program=merged; applyBg(document.body,program.out.bg); stage.setConfig(program); stage.setHistory(history);
     pp.setWantTimers(wantsPpTimers(merged));
+    // re-subscribe only when the source list actually changed, so a Take doesn't
+    // restart every poll and re-hit the endpoints
+    const nextSrc=JSON.stringify((merged.data&&merged.data.sources)||[]);
+    if(nextSrc!==lastDataSrc){ lastDataSrc=nextSrc; dataFeed.setSources((merged.data&&merged.data.sources)||[]); }
     if(connChanged){ pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
     if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; stage.setHistory(history); }  // manual "Clear list" from the console
     if(merged._take && merged._take!==lastTake){ lastTake=merged._take; stage.replayVisible(); }
@@ -1946,6 +2387,7 @@ if(!isOutput){
     const s=selected();
     if(s){ selectedId=s.id; pvStage.select(s.id); panels.append(secInspector(s)); }
     panels.append(secConnection());
+    panels.append(secData());
     panels.append(secRules());
     panels.append(secTheme());
     panels.append(secOutput());
@@ -2401,6 +2843,20 @@ if(!isOutput){
         typeGroup("Text style",st.text,onCh)
       ]);
     }
+    if(t==="qr"){
+      const len=(c.text||"").length;
+      return group("QR code",[
+        rowArea("Link or text",c.text,(v)=>{c.text=v;onCh();},"https://church.example.org/give"),
+        el("p",{class:"hint",text:len?(len+" of 213 characters used."):"Paste your giving link. Up to 213 characters."}),
+        rowText("Caption",c.label,(v)=>{c.label=v;onCh();},"e.g. SCAN TO GIVE"),
+        rowColor("Code colour",c.fg||"#000000",(v)=>{c.fg=v;onCh();}),
+        rowToggle("White backing plate (recommended)",c.plate!==false,(v)=>{c.plate=v;onCh();renderPanels();}),
+        (c.plate!==false)?rowColor("Plate colour",c.bg||"#ffffff",(v)=>{c.bg=v;onCh();}):null,
+        el("p",{class:"hint",html:"A QR needs <b>strong contrast and a quiet margin</b> to scan. Keep the plate on unless you are placing it over a plain, light area — a code straight onto video usually will not read."}),
+        rowRange("Quiet margin (modules)",c.quiet==null?4:c.quiet,0,8,1,"",(v)=>{c.quiet=v;onCh();}),
+        typeGroup("Caption style",st.label,onCh)
+      ]);
+    }
     if(t==="clock"){
       return group("Timer / clock",[
         rowSeg("Mode",c.mode||"time",[["time","Time of day"],["countdown","Countdown to"],["pptimer","ProPresenter timer"]],
@@ -2459,6 +2915,79 @@ if(!isOutput){
   }
   function statLine(label,id,val){ return el("div",{class:"row",style:"justify-content:space-between;font-family:var(--mono);font-size:12px;color:var(--muted)"},
     [el("span",{text:label}),el("b",{id:id,text:val,style:"color:var(--ink)"})]); }
+
+  /* ---- live data sources ----
+     Bound values become {{name}} placeholders usable in ANY operator-typed text —
+     a QR link, a clock label, a bullet list, a manual verse. */
+  const cslDataFeed=createDataFeed((v,st)=>{ pvStage.setVars(v); pgStage.setVars(v); paintDataStatus(v,st); });
+  let _cslDataSig="";
+  function dataOf(){ if(!preview.data||typeof preview.data!=="object")preview.data={sources:[]};
+    if(!Array.isArray(preview.data.sources))preview.data.sources=[]; return preview.data; }
+  function refreshDataFeed(){
+    const sig=JSON.stringify(dataOf().sources);
+    if(sig===_cslDataSig)return;                 // don't restart polling on unrelated edits
+    _cslDataSig=sig; cslDataFeed.setSources(dataOf().sources);
+  }
+  function paintDataStatus(vars,st){
+    const n=$("dataVars"); if(!n)return;
+    n.innerHTML="";
+    const keys=Object.keys(vars||{}).filter(k=>k.indexOf(".")<0).sort();
+    if(!keys.length){ n.append(el("p",{class:"hint",text:"No values yet."})); return; }
+    const box=el("div",{style:"font-size:11px;font-family:var(--mono,monospace);line-height:1.7"});
+    keys.slice(0,24).forEach(k=>{
+      const row=el("div");
+      const key=el("b",{style:"color:var(--ink)"}); key.append(document.createTextNode("{{"+k+"}}"));
+      const val=el("span",{style:"color:var(--muted)"}); val.append(document.createTextNode("  =  "+String(vars[k]).slice(0,48)));
+      row.append(key,val); box.append(row);
+    });
+    n.append(box);
+    n.append(el("p",{class:"hint",text:"Paste a placeholder into any text field — captions, verses, QR links, bullet lists."}));
+  }
+  function secData(){
+    const d=dataOf();
+    const wrap=el("div");
+    if(!d.sources.length) wrap.append(el("div",{class:"empty",text:"No sources. Add one to pull live values into your graphics."}));
+    d.sources.forEach((s,i)=>{
+      const card=el("div",{class:"grp",style:"padding:8px 10px"});
+      const head=el("div",{class:"row",style:"justify-content:space-between;align-items:center"});
+      const onOff=el("input",{type:"checkbox"}); onOff.checked=s.enabled!==false;
+      onOff.onchange=()=>{s.enabled=onOff.checked;savePreview();refreshDataFeed();};
+      const lbl=el("label",{style:"display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)"});
+      lbl.append(onOff,document.createTextNode("Source "+(i+1)));
+      head.append(lbl,iconBtn("trash","Remove source",()=>{d.sources.splice(i,1);savePreview();refreshDataFeed();renderPanels();},"danger"));
+      card.append(head);
+      card.append(rowText("Name (optional prefix)",s.name,(v)=>{s.name=v;savePreview();refreshDataFeed();},"e.g. giving"));
+      card.append(rowText("URL",s.url,(v)=>{s.url=v;savePreview();refreshDataFeed();},"https://docs.google.com/…/pub?output=csv"));
+      card.append(rowSelect("Format",s.kind||"csv",[["csv","CSV / Google Sheet"],["json","JSON"],["text","Plain text"]],
+        (v)=>{s.kind=v;savePreview();refreshDataFeed();renderPanels();}));
+      if((s.kind||"csv")==="json")
+        card.append(rowText("Path into the JSON (optional)",s.pick,(v)=>{s.pick=v;savePreview();refreshDataFeed();},"e.g. data.totals"));
+      if((s.kind||"csv")==="csv"){
+        card.append(rowSelect("Sheet layout",s.layout||"pairs",
+          [["pairs","Name,value on each row"],["table","Header row, values on row 2"]],
+          (v)=>{s.layout=v;savePreview();refreshDataFeed();}));
+        card.append(el("p",{class:"hint",html:"A two-column sheet is ambiguous, so pick what matches. <b>Name,value</b>: <i>offering,$12450</i> on each row. <b>Header row</b>: names across the top, values underneath."}));
+      }
+      card.append(rowRange("Refresh every (seconds)",Math.max(5,Number(s.interval)||60),5,600,5,"s",(v)=>{s.interval=v;savePreview();refreshDataFeed();}));
+      const st=(cslDataFeed.status()||{})[s.id];
+      if(st){
+        const line=el("p",{class:"hint",style:"color:"+(st.ok?"#8ef0b8":"#ff9d96")});
+        line.append(document.createTextNode((st.ok?"✓ ":"✕ ")+st.msg));
+        card.append(line);
+      }
+      wrap.append(card);
+    });
+    const actions=el("div",{class:"row",style:"gap:8px;flex-wrap:wrap"},[
+      el("button",{class:"btn sm",html:svg("plus")+" Add source",onclick:()=>{
+        d.sources.push({id:uid(),enabled:true,name:"",url:"",kind:"csv",interval:60});
+        savePreview();renderPanels();}}),
+      el("button",{class:"btn ghost sm",text:"Refresh now",onclick:()=>cslDataFeed.refresh()})
+    ]);
+    const vars=el("div",{class:"grp"},[el("div",{class:"gh",text:"Available placeholders"}),el("div",{id:"dataVars"})]);
+    setTimeout(()=>paintDataStatus(cslDataFeed.vars(),cslDataFeed.status()),0);
+    const note=el("p",{class:"hint",html:"For a <b>Google Sheet</b>: File → Share → Publish to web → CSV. Two columns (<i>name,value</i>) become named placeholders; otherwise the header row names them. A source that fails keeps the last good values rather than blanking a graphic."});
+    return section("Live data",[wrap,actions,vars,note],false,"data");
+  }
 
   /* ---- automation rules ----
      "While the live slide matches ___, show/hide ___." A rule takes full control

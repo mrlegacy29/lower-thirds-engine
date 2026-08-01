@@ -183,6 +183,48 @@ function createServer(htmlFile) {
       req.on("close", () => { clearInterval(ka); sseClients.delete(res); });
       return;
     }
+    // Live-data fetch for bound sources (Google Sheets CSV, a JSON endpoint, RSS).
+    // Same origin gate as /pp — this can reach anything the stream PC can, so it must
+    // not be usable by a remote page. https is allowed here (unlike /pp, which talks
+    // to ProPresenter on the LAN over http).
+    if (p === "/fetch" && req.method === "GET") {
+      if (!originAllowed(req)) return deny(res, "cross-origin use of the data proxy");
+      const target = u.query.target;
+      if (!target) { res.writeHead(400); return res.end("missing target"); }
+      let t;
+      try { t = new url.URL(target); } catch (e) { res.writeHead(400); return res.end("bad target"); }
+      if (t.protocol !== "http:" && t.protocol !== "https:") { res.writeHead(400); return res.end("http(s) only"); }
+      const mod = t.protocol === "https:" ? require("https") : http;
+      const opts = { hostname: t.hostname, port: t.port || (t.protocol === "https:" ? 443 : 80),
+                     path: t.pathname + t.search, method: "GET", timeout: 8000,
+                     headers: { "User-Agent": "LowerThirdsEngine", "Accept": "*/*" } };
+      let done = false;
+      const fail = (why) => {
+        if (done) return; done = true;
+        if (res.headersSent) { try { res.end(); } catch (e) {} return; }
+        try { cors(res, req); res.writeHead(502, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "fetch failed", detail: String(why || "") })); } catch (e) {}
+      };
+      const freq = mod.request(opts, (pres) => {
+        // Cap the body: a bound source that turns into a huge download must not be able
+        // to exhaust memory mid-service.
+        let len = 0; const chunks = [];
+        pres.on("data", (c) => { len += c.length; if (len > 2e6) { pres.destroy(); return fail("response too large"); } chunks.push(c); });
+        pres.on("end", () => {
+          if (done) return; done = true;
+          cors(res, req);
+          // Always text/plain + nosniff: the body is untrusted third-party content and
+          // must never be able to execute on the relay's own origin.
+          res.writeHead(pres.statusCode || 502, { "Content-Type": "text/plain; charset=utf-8", "X-Content-Type-Options": "nosniff" });
+          res.end(Buffer.concat(chunks).toString("utf8"));
+        });
+        pres.on("error", (e) => fail(e && e.message));
+      });
+      freq.on("timeout", () => { freq.destroy(); fail("timeout"); });
+      freq.on("error", (e) => fail(e && e.message));
+      freq.end();
+      return;
+    }
     if (p === "/pp" && req.method === "GET") {
       // The proxy can reach any http host the stream PC can. With a wildcard CORS
       // header a remote page could use it to read church-LAN devices, so it is

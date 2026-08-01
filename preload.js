@@ -110,6 +110,14 @@ function render(s) {
     textEl.innerHTML = "<b>Update ready</b>" + (s.newVersion ? " (v" + s.newVersion + ")" : "") + " \u2014 restart to install.";
     btnEl.style.display = "";
     show();
+  } else if (s.status === "current" && s.announce) {
+    // Only when the operator explicitly asked (Help > Check for Updates). Previously a
+    // successful "you're up to date" produced no feedback whatsoever, so the menu item
+    // looked broken. Background checks still stay silent.
+    bannerEl.dataset.key = "current";
+    textEl.innerHTML = "<b>You're up to date.</b>" + (s.version ? " (v" + s.version + ")" : "");
+    show();
+    setTimeout(hide, 3500);
   } else if (s.status === "error") {
     if (s.quiet) { hide(); return; }   // background (launch/periodic) check — don't nag during a service
     bannerEl.dataset.key = "err"; if (dismissed === "err") return;
@@ -127,4 +135,14 @@ if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", injectBanner);
 } else { injectBanner(); }
 
-ipcRenderer.on("updater:status", (_e, s) => { injectBanner(); render(s); });
+// Preload runs at document-start, where document.head/body are still null. An updater
+// message arriving before DOMContentLoaded would throw in injectBanner(), so hold the
+// latest state and render it once the document exists.
+let pendingStatus = null;
+ipcRenderer.on("updater:status", (_e, s) => {
+  if (document.readyState === "loading" || !document.body) { pendingStatus = s; return; }
+  injectBanner(); render(s);
+});
+window.addEventListener("DOMContentLoaded", () => {
+  if (pendingStatus) { injectBanner(); render(pendingStatus); pendingStatus = null; }
+});

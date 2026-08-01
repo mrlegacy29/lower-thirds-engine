@@ -63,8 +63,8 @@ function boot() {
     // check for updates shortly after launch, then every 5 minutes while running
     // (packaged builds only). Both are background checks, so a failed check stays quiet.
     if (app.isPackaged && autoUpdater) {
-      setTimeout(() => { manualCheck = false; try { autoUpdater.checkForUpdates(); } catch (e) {} }, 3500);
-      updateTimer = setInterval(() => { manualCheck = false; try { autoUpdater.checkForUpdates(); } catch (e) {} }, 5 * 60 * 1000);
+      setTimeout(() => { manualCheck = false; safeCheckForUpdates(); }, 3500);
+      updateTimer = setInterval(() => { manualCheck = false; safeCheckForUpdates(); }, 5 * 60 * 1000);
     }
   });
 
@@ -102,7 +102,7 @@ function createWindow() {
   win.webContents.on("did-finish-load", () => pushUpdateState());
   // open target=_blank / external links in the user's real browser
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) { shell.openExternal(url); return { action: "deny" }; }
+    if (/^https?:\/\//i.test(url)) { Promise.resolve(shell.openExternal(url)).catch(() => {}); return { action: "deny" }; }
     return { action: "allow" };
   });
   win.on("closed", () => { win = null; });
@@ -111,6 +111,21 @@ function createWindow() {
 function pushUpdateState() {
   if (win && !win.isDestroyed()) {
     win.webContents.send("updater:status", Object.assign({ version: app.getVersion() }, updateState));
+  }
+}
+
+// checkForUpdates() REJECTS asynchronously (no network, DNS blocked, 404 on
+// latest.yml). A synchronous try/catch cannot see that, so a failed background check
+// surfaced as an unhandled rejection in the main process. Route every call here.
+function safeCheckForUpdates() {
+  if (!autoUpdater) { updateState = { status: "error", message: "Updater not available in dev mode." }; pushUpdateState(); return; }
+  try {
+    const p = autoUpdater.checkForUpdates();
+    if (p && typeof p.catch === "function") {
+      p.catch((e) => { updateState = { status: "error", message: String((e && e.message) || e), quiet: !manualCheck }; pushUpdateState(); });
+    }
+  } catch (e) {
+    updateState = { status: "error", message: String((e && e.message) || e), quiet: !manualCheck }; pushUpdateState();
   }
 }
 
@@ -123,7 +138,11 @@ function setupUpdater() {
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on("checking-for-update", () => { updateState = { status: "checking" }; pushUpdateState(); });
   autoUpdater.on("update-available", (info) => { updateState = { status: "available", newVersion: info && info.version }; pushUpdateState(); });
-  autoUpdater.on("update-not-available", () => { updateState = { status: "current" }; pushUpdateState(); });
+  autoUpdater.on("update-not-available", () => {
+    // Tell the operator when THEY asked; stay silent for the background checks so
+    // nothing flashes mid-service.
+    updateState = { status: "current", announce: manualCheck }; pushUpdateState();
+  });
   autoUpdater.on("download-progress", (p) => { updateState = { status: "downloading", percent: Math.round(p.percent || 0) }; pushUpdateState(); });
   autoUpdater.on("update-downloaded", (info) => { updateState = { status: "ready", newVersion: info && info.version }; pushUpdateState(); });
   autoUpdater.on("error", (err) => { updateState = { status: "error", message: String(err && err.message || err), quiet: !manualCheck }; pushUpdateState(); });
@@ -133,7 +152,7 @@ function setupUpdater() {
 ipcMain.on("updater:check", () => {
   manualCheck = true;   // explicit user check (menu / banner) — surface the result, including failures
   if (!autoUpdater) { updateState = { status: "error", message: "Updater not available in dev mode." }; pushUpdateState(); return; }
-  try { autoUpdater.checkForUpdates(); } catch (e) { updateState = { status: "error", message: String(e && e.message || e) }; pushUpdateState(); }
+  safeCheckForUpdates();
 });
 ipcMain.on("updater:install", () => { if (autoUpdater) { try { autoUpdater.quitAndInstall(); } catch (e) {} } });
 ipcMain.handle("app:info", () => ({ version: app.getVersion(), name: app.getName(), port: PORT, packaged: app.isPackaged }));
@@ -184,7 +203,7 @@ function buildMenu() {
         },
         {
           label: "Open Output in Browser",
-          click: () => shell.openExternal("http://localhost:" + PORT + "/output"),
+          click: () => { Promise.resolve(shell.openExternal("http://localhost:" + PORT + "/output")).catch(() => {}); },
         },
         { type: "separator" },
         isMac ? { role: "close" } : { role: "quit" },
