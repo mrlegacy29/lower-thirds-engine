@@ -592,6 +592,113 @@ const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Serm
   bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media"};
 const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media"];
 
+/* ============================================== GRAPHICS IMPORT / EXPORT (pure)
+   Portable .json for moving designs between machines (home <-> stream PC), backing
+   them up, or sharing them. Three kinds share one envelope so a single Import
+   button handles any file: `look` (a whole design), `element` (one lower third),
+   `library` (the preset library). Imported images are already inlined as base64
+   data URIs in the config, so a look file is self-contained.
+
+   NOTHING FROM A FILE IS TRUSTED. The old importer did
+   `if(p.folders){presets=p; save();}` — any JSON with a truthy `folders` key
+   overwrote the library and was PERSISTED BEFORE it was rendered, so one malformed
+   file bricked the console on every later boot with no way back from the UI. Every
+   file is now validated and rebuilt from known-good defaults before anything is
+   written, and a bad file writes nothing at all.
+
+   Kept at top level (not in the console scope) so it is unit-testable. */
+const GFX_FORMAT="lower-thirds-engine";
+const GFX_VERSION=1;
+
+function gfxWrap(kind,body){
+  return Object.assign({format:GFX_FORMAT,version:GFX_VERSION,kind,exported:new Date().toISOString()},body);
+}
+function safeName(s){ return String(s||"graphic").replace(/[^\w\- ]+/g,"").trim().replace(/\s+/g,"-").slice(0,40)||"graphic"; }
+
+// Rebuild from a fresh, known-good default of the DECLARED type, so unknown or
+// hostile fields in a file can never reach the renderer.
+function sanitizeElement(raw){
+  if(!raw||typeof raw!=="object")return null;
+  if(ADD_TYPES.indexOf(raw.type)<0)return null;         // unknown type -> drop it
+  const base=createElement(raw.type);
+  // Allowlist the keys from a FRESHLY BUILT element of this type, so the list
+  // maintains itself as features are added and anything a file invented is
+  // dropped rather than merged into live state.
+  const allowed=new Set(Object.keys(base).concat(["id","type"]));
+  const filtered={};
+  Object.keys(raw).forEach(k=>{ if(allowed.has(k)) filtered[k]=raw[k]; });
+  const e=deepMerge(base,filtered);
+  e.type=raw.type; e.id=uid();                          // always re-id: incoming ids can collide
+  return e;
+}
+// Re-issuing ids breaks cross-references, so remap them together and drop any that
+// dangle — a dangling visWith/dock.to hides an element forever with no way to fix
+// it from the inspector.
+function sanitizeElements(list){
+  const out=[],map={};
+  (Array.isArray(list)?list:[]).forEach(r=>{ const e=sanitizeElement(r); if(e){ if(r&&r.id)map[r.id]=e.id; out.push(e); } });
+  out.forEach(e=>{
+    if(e.visWith){ if(map[e.visWith])e.visWith=map[e.visWith]; else { delete e.visWith; if(e.vis==="linked")e.vis="normal"; } }
+    if(e.dock&&e.dock.to){ if(map[e.dock.to])e.dock.to=map[e.dock.to]; else { e.dock.to=null; e.dock.on=false; } }
+  });
+  return out;
+}
+function sanitizeLibrary(raw){
+  const folders=[];
+  (Array.isArray(raw)?raw:[]).forEach(f=>{
+    if(!f||typeof f!=="object")return;
+    const items=[];
+    (Array.isArray(f.items)?f.items:[]).forEach(it=>{
+      if(!it||typeof it!=="object"||!it.config)return;
+      const cfg=deepMerge(defaultConfig(),it.config);
+      cfg.elements=sanitizeElements(it.config.elements);
+      delete cfg.conn;                                   // never carry another machine's ProPresenter IP
+      items.push({id:uid(),name:String(it.name||"Preset").slice(0,80),config:cfg});
+    });
+    folders.push({id:uid(),name:String(f.name||"Folder").slice(0,60),items});
+  });
+  return folders;
+}
+
+// -> {ok:true, kind, payload} | {ok:false, error}
+function parseGfx(text){
+  let p; try{ p=JSON.parse(text); }catch(e){ return {ok:false,error:"That isn't a valid JSON file."}; }
+  if(!p||typeof p!=="object") return {ok:false,error:"That file doesn't contain a graphic."};
+  if(p.format && p.format!==GFX_FORMAT) return {ok:false,error:"That file was made by a different app ("+String(p.format).slice(0,40)+")."};
+  if(p.version && Number(p.version)>GFX_VERSION) return {ok:false,error:"That file was made by a newer version of this app. Update, then try again."};
+
+  if(p.kind==="element"||(!p.kind&&p.element)){
+    const e=sanitizeElement(p.element);
+    return e?{ok:true,kind:"element",payload:e}:{ok:false,error:"That element file has no recognisable element type."};
+  }
+  if(p.kind==="look"||(!p.kind&&p.config&&p.config.elements)){
+    const src=p.config||{};
+    const cfg=deepMerge(defaultConfig(),src);
+    cfg.elements=sanitizeElements(src.elements);
+    delete cfg.conn;
+    if(!cfg.elements.length) return {ok:false,error:"That look file has no usable elements."};
+    return {ok:true,kind:"look",payload:{name:String(p.name||"Imported look").slice(0,80),config:cfg}};
+  }
+  // library — the new envelope, or the legacy bare {folders:[...]} export
+  const rawFolders=(p.folders!==undefined)?p.folders:null;
+  if(rawFolders!==null){
+    if(!Array.isArray(rawFolders)) return {ok:false,error:"That preset file is malformed (folders isn't a list)."};
+    const folders=sanitizeLibrary(rawFolders);
+    if(!folders.length) return {ok:false,error:"That preset file has no usable folders."};
+    return {ok:true,kind:"library",payload:folders};
+  }
+  return {ok:false,error:"That file doesn't look like a graphic, look, or preset library."};
+}
+
+function gfxSave(obj,filename){
+  try{
+    const blob=new Blob([JSON.stringify(obj,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=el("a",{href:url,download:filename}); document.body.appendChild(a); a.click();
+    setTimeout(()=>{ try{URL.revokeObjectURL(url); a.remove();}catch(e){} },1000);   // don't leak blob URLs
+  }catch(e){ alert("Couldn't save the file: "+(e&&e.message||e)); }
+}
+
 /* ============================================================= SCRIPTURE PARSER */
 const BOOKS=("Genesis|Exodus|Leviticus|Numbers|Deuteronomy|Joshua|Judges|Ruth|1 Samuel|2 Samuel|"+
  "1 Kings|2 Kings|1 Chronicles|2 Chronicles|Ezra|Nehemiah|Esther|Job|Psalms|Psalm|Proverbs|"+
@@ -1565,7 +1672,9 @@ if(!isOutput){
       const eye=iconBtn(d.visible?"eye":"eyeoff", d.visible?"Visible — click to hide":"Hidden — click to show",
         (e)=>{e.stopPropagation();d.visible=!d.visible;applyPreview();renderPanels();}, d.visible?"on":"");
       const nm=el("div",{class:"nm",title:"Select",onclick:()=>{selectedId=d.id;pvStage.select(d.id);renderPanels();},
-        html:`${escapeHtml(d.name||TYPE_LABELS[d.type])} <span class="ty">${d.type}</span>`});
+        // d.type is escaped too: it arrives from imported files and broadcast configs,
+        // so an unescaped interpolation here was an HTML-injection sink.
+        html:`${escapeHtml(d.name||TYPE_LABELS[d.type])} <span class="ty">${escapeHtml(d.type)}</span>`});
       const up=iconBtn("up","Move up",(e)=>{e.stopPropagation();moveEl(d.id,-1);});
       const dn=iconBtn("down","Move down",(e)=>{e.stopPropagation();moveEl(d.id,1);});
       const del=iconBtn("trash","Delete",(e)=>{e.stopPropagation();
@@ -1642,7 +1751,13 @@ if(!isOutput){
     const onCh=()=>applyPreview();
     const nodes=[];
     nodes.push(rowText("Element name",d.name,(v)=>{d.name=v;applyPreview();
-      const nm=document.querySelector(".elrow.sel .nm"); if(nm)nm.innerHTML=`${escapeHtml(v||TYPE_LABELS[d.type])} <span class="ty">${d.type}</span>`;}));
+      const nm=document.querySelector(".elrow.sel .nm"); if(nm)nm.innerHTML=`${escapeHtml(v||TYPE_LABELS[d.type])} <span class="ty">${escapeHtml(d.type)}</span>`;}));
+    // Share or back up one designed lower third on its own; Import puts it back
+    // into any look (with a fresh id, so it can't collide with what's already there).
+    nodes.push(el("div",{class:"row"},[
+      el("button",{class:"btn ghost sm",style:"flex:1",html:svg("download")+" Export this element",
+        title:"Save just this element as a portable .json",onclick:()=>exportElement(d)})
+    ]));
 
     // CONTENT (per type)
     nodes.push(contentGroup(d,onCh));
@@ -1737,8 +1852,20 @@ if(!isOutput){
     const hasM=!!b.mediaSrc, isUrl=hasM&&/^https?:/i.test(b.mediaSrc);
     const fileInput=el("input",{type:"file",accept:"image/*,video/*",style:"display:none"});
     fileInput.onchange=()=>{ const f=fileInput.files&&fileInput.files[0]; if(!f)return;
-      if(f.size>8*1024*1024 && /^video\//.test(f.type)){
-        alert("That video is "+(f.size/1048576).toFixed(1)+" MB. Inlining a large video can exceed local storage and break the OBS output.\n\nHost it (a direct link, or a local web server) and paste the URL in the “…or paste media URL” field below.");
+      // Guard EVERY media type, not just video. Media is inlined as a base64 data
+      // URI into the config, and that config is stored three times over in
+      // localStorage and POSTed to the relay (5 MB cap). An unguarded large image
+      // silently blew the quota, so saves stopped persisting and Take never
+      // reached OBS while the console still said ON AIR.
+      // GIFs skip the canvas downscaler (it would kill the animation), so they go
+      // in at full size and get the same limit as video.
+      const isVideo=/^video\//.test(f.type), isGif=/gif$/i.test(f.type);
+      const cap=(isVideo||isGif)?8:12;                 // MB — stills are downscaled to 1600px first
+      if(f.size>cap*1024*1024){
+        alert("That "+(isVideo?"video":isGif?"GIF":"image")+" is "+(f.size/1048576).toFixed(1)+" MB.\n\n"+
+              "Media is embedded in the show file, so anything this large can exceed local storage "+
+              "and stop the output updating.\n\nHost it (a direct link, or a local web server) and "+
+              "paste the URL in the “…or paste media URL” field below.");
         fileInput.value=""; return;
       }
       importMedia(f,(url,kind)=>{ b.mediaSrc=url; b.mediaType=kind; onCh(); renderPanels(); }); };
@@ -2205,10 +2332,12 @@ if(!isOutput){
     const actions=el("div",{class:"row",style:"flex-wrap:wrap;gap:8px"},[
       el("button",{class:"btn sm",html:svg("plus")+" New folder",onclick:()=>{const n=prompt("New folder name:","Folder");if(n){presets.folders.push({id:uid(),name:n,items:[]});savePresets(presets);renderPanels();}}}),
       el("button",{class:"btn sm",html:svg("save")+" Save preview as preset",onclick:()=>savePresetTo(0)}),
-      el("button",{class:"btn ghost sm",html:svg("download")+" Export",onclick:exportPresets}),
-      el("button",{class:"btn ghost sm",html:svg("upload")+" Import",onclick:importPresets})
+      el("button",{class:"btn ghost sm",html:svg("download")+" Export look",title:"Save the current preview design as a portable .json",onclick:exportLook}),
+      el("button",{class:"btn ghost sm",html:svg("download")+" Export all presets",title:"Save the whole preset library",onclick:exportPresets}),
+      el("button",{class:"btn ghost sm",html:svg("upload")+" Import…",title:"Import a look, a single element, or a preset library",onclick:importGraphics})
     ]);
-    return section("Presets & folders",[wrap,actions],false,"presets");
+    const note=el("p",{class:"hint",html:"<b>Export look</b> saves the current design (imported images travel inside the file, so it works on another PC). <b>Import</b> accepts a look, a single element, or a preset library — it validates the file first and won't overwrite anything if it's bad."});
+    return section("Presets & folders",[wrap,actions,note],false,"presets");
   }
   function snapshotForPreset(){ const c=clone(preview); delete c.conn; return c; }
   function savePresetTo(fi){ const name=prompt("Preset name:","Preset "+(presets.folders[fi].items.length+1)); if(!name)return;
@@ -2218,12 +2347,67 @@ if(!isOutput){
     (preview.elements||[]).forEach(e=>{ if(!e.id)e.id=uid(); });
     selectedId=preview.elements[0]?preview.elements[0].id:null; applyPreview(); renderPanels(); }
   function flashName(n){ /* no-op visual */ }
-  function exportPresets(){ const blob=new Blob([JSON.stringify(presets,null,2)],{type:"application/json"});
-    const a=el("a",{href:URL.createObjectURL(blob),download:"lower-thirds-presets.json"}); a.click(); }
-  function importPresets(){ const inp=el("input",{type:"file",accept:".json"});
-    inp.onchange=()=>{const f=inp.files[0];if(!f)return;const rd=new FileReader();
-      rd.onload=()=>{try{const p=JSON.parse(rd.result); if(p.folders){presets=p;savePresets(presets);renderPanels();}}catch(e){alert("Bad preset file.");}};
-      rd.readAsText(f);}; inp.click(); }
+  /* ================= GRAPHICS IMPORT / EXPORT =================================
+     Portable .json files for moving designs between machines (home <-> stream PC),
+     backing them up, or sharing them.
+
+     Three kinds, all in one envelope so a single Import button handles any file:
+       look     — one design (every element on the stage)
+       element  — a single lower third
+       library  — the whole preset library, folders and all
+
+     Imported media rides along: images are already inlined as base64 data URIs in
+     the config, so a look file is self-contained.
+
+     NOTHING IS TRUSTED. The old importer did `if(p.folders){presets=p;save()}` —
+     any JSON with a truthy `folders` key overwrote the library and was PERSISTED
+     BEFORE being rendered, so one malformed file bricked the console on every
+     later boot. Now every file is validated and rebuilt from known-good defaults
+     before anything is written. */
+  /* ---- export ---- */
+  function exportLook(){
+    const cfg=snapshotForPreset();
+    gfxSave(gfxWrap("look",{name:"Look",config:cfg}),"lt-look-"+safeName(new Date().toISOString().slice(0,10))+".json");
+  }
+  function exportElement(d){
+    if(!d)return;
+    gfxSave(gfxWrap("element",{element:clone(d)}),"lt-"+safeName(d.name||d.type)+".json");
+  }
+  function exportPresets(){
+    gfxSave(gfxWrap("library",{folders:presets.folders}),"lower-thirds-presets.json");
+  }
+
+  /* ---- import ---- */
+  function importGraphics(){
+    const inp=el("input",{type:"file",accept:".json,application/json"});
+    inp.onchange=()=>{
+      const f=inp.files&&inp.files[0]; if(!f)return;
+      if(f.size>25*1024*1024){ alert("That file is "+(f.size/1048576).toFixed(1)+" MB — too large to import safely."); return; }
+      const rd=new FileReader();
+      rd.onerror=()=>alert("Couldn't read that file.");
+      rd.onload=()=>{
+        const r=parseGfx(String(rd.result||""));
+        if(!r.ok){ alert("Import failed.\n\n"+r.error); return; }   // nothing written on failure
+        if(r.kind==="element"){
+          preview.elements.push(r.payload); selectedId=r.payload.id;
+          savePreview(); applyPreview(); renderPanels();
+          alert("Added 1 element to the preview.\n\nPress TAKE to send it live.");
+        } else if(r.kind==="look"){
+          if(!confirm("Replace the current preview with the imported look?\n\nYour presets are untouched, and this only affects Preview until you press TAKE."))return;
+          const keepConn=clone(preview.conn||{});
+          preview=r.payload.config; preview.conn=keepConn;
+          selectedId=preview.elements[0]?preview.elements[0].id:null;
+          savePreview(); applyPreview(); renderPanels();
+        } else if(r.kind==="library"){
+          const merge=confirm("Import "+r.payload.length+" folder(s).\n\nOK = ADD to your presets.\nCancel = REPLACE everything.");
+          presets.folders=merge?presets.folders.concat(r.payload):r.payload;
+          savePresets(presets); renderPanels();
+        }
+      };
+      rd.readAsText(f);
+    };
+    inp.click();
+  }
 
   /* ---- OPERATOR MODE (Showcaller / Simple) ---- */
   const LS_VIEW="pplt.view.v1";
