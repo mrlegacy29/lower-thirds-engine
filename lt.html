@@ -996,6 +996,10 @@ const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Serm
   bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media",
   clock:"Timer / clock",qr:"QR code"};
 const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media","clock","qr"];
+// Types that can scroll as a ticker / credits-roll. Shared by setText (which decides
+// whether to hand off to renderMarquee) and applyBox (which needs the same answer one
+// step EARLIER, from the config alone).
+const MARQ_TYPES=["text","reference","scripture","name","sermonTitle","bulletList","history","eventList"];
 
 /* ------------------------------------------------------------- clock helpers */
 function pad2(n){ n=Math.floor(Math.abs(n)); return (n<10?"0":"")+n; }
@@ -1497,16 +1501,22 @@ function makeElRenderer(){
   let loopAnims=[], loopSig="";          // continuous-motion handles
   let marqOn=false, marqTrack=null, marqSig="";  // is content currently a ticker/roll track
 
-  let layoutSig="";
+  let layoutSig="",layoutClearT=null;
   function setLayout(L,animate,ms,ease){
     const sig=L.x+","+L.y+","+L.w+","+L.h;
     if(sig===layoutSig) return;
     const first=(layoutSig==="");
     layoutSig=sig;
+    // Cancel any pending transition-clear from a PREVIOUS move. Left running, the old
+    // timer fired mid-flight through the next move and stripped the transition, so a
+    // second dock move (e.g. a clear while a dock was still gliding) snapped instead
+    // of easing.
+    if(layoutClearT){ clearTimeout(layoutClearT); layoutClearT=null; }
     if(animate && !first){
       root.style.transition=`left ${ms}ms ${ease},top ${ms}ms ${ease},width ${ms}ms ${ease},height ${ms}ms ${ease}`;
       root.style.left=L.x+"px"; root.style.top=L.y+"px"; root.style.width=L.w+"px"; root.style.height=L.h+"px";
-      setTimeout(()=>{ if(root.style.transition && /left/.test(root.style.transition)) root.style.transition=""; }, ms+50);
+      layoutClearT=setTimeout(()=>{ layoutClearT=null;
+        if(root.style.transition && /left/.test(root.style.transition)) root.style.transition=""; }, ms+50);
     } else {
       root.style.left=L.x+"px"; root.style.top=L.y+"px"; root.style.width=L.w+"px"; root.style.height=L.h+"px";
     }
@@ -1543,7 +1553,12 @@ function makeElRenderer(){
   }
   function applyBox(d){ const b=d.box;
     const hasMedia=!!(b.mediaSrc);
-    box.style.background=hasMedia?"transparent":bg(b);
+    // Set backgroundImage/backgroundColor, NOT the `background` shorthand. The shorthand
+    // resets background-size, which silently killed the Gradient-shift motion on the very
+    // next render (applyLoop sets backgroundSize:220% once, applyBox then wiped it).
+    const bgv=hasMedia?"transparent":bg(b);
+    if(/^linear-gradient/.test(bgv)){ box.style.backgroundColor="transparent"; box.style.backgroundImage=bgv; }
+    else { box.style.backgroundImage="none"; box.style.backgroundColor=bgv; }
     const rad=(b.shape==="pill")?999:(b.style==="bar"?0:b.radius);
     box.style.borderRadius=rad+"px";
     let sh=b.shadow?"0 16px 46px rgba(0,0,0,.45)":"";
@@ -1557,7 +1572,11 @@ function makeElRenderer(){
     content.style.padding=`${b.padY}px ${b.padX}px`;
     content.style.textAlign=b.align;
     content.style.alignItems=b.align==="center"?"center":(b.align==="right"?"flex-end":"flex-start");
-    content.className="lt-content"+(b.valign==="top"?" va-top":b.valign==="bottom"?" va-bottom":"")+(marqOn?" marqfill":"");
+    // Derive the marquee class from the CONFIG, not from marqOn. applyBox runs before
+    // setText, and marqOn is only set later by renderMarquee — so reading it here left
+    // the class one render behind and the first ticker frame was mis-centred.
+    const willMarq=MARQ_TYPES.indexOf(d.type)>=0 && !!(d.loop&&(d.loop.type==="ticker"||d.loop.type==="rollV"));
+    content.className="lt-content"+(b.valign==="top"?" va-top":b.valign==="bottom"?" va-bottom":"")+(willMarq?" marqfill":"");
     const showAcc=b.accent&&b.style!=="minimal"&&!hasMedia;
     accent.style.display=showAcc?"block":"none";
     accent.style.width=b.accentW+"px"; accent.style.background=b.accentColor;
@@ -1666,6 +1685,14 @@ function makeElRenderer(){
   function renderMarquee(d,data,vertical){
     const sty=marqStyle(d);
     const parts0=marqText(d,data).filter(s=>s!=="");
+    // With nothing to scroll, the track still got built and its separator span went to
+    // air on its own — an empty ref list on a ticker scrolled bare diamonds. Clear out
+    // and leave the element blank instead.
+    if(!parts0.length){
+      content.querySelectorAll(".node").forEach(n=>n.remove());
+      marqTrack=null; marqSig=""; marqOn=false;
+      return;
+    }
     const sig=(vertical?"v|":"h|")+JSON.stringify(sty)+"|"+parts0.join("\u0001");
     if(marqOn && marqTrack && marqSig===sig) return;   // unchanged -> keep the running scroll
     marqSig=sig;
@@ -1686,7 +1713,7 @@ function makeElRenderer(){
   function setText(d,data){
     const t=d.type, st=d.style||{};
     const lt=d.loop&&d.loop.type;
-    const canMarq=["text","reference","scripture","name","sermonTitle","bulletList","history","eventList"].indexOf(t)>=0;
+    const canMarq=MARQ_TYPES.indexOf(t)>=0;
     if(canMarq&&(lt==="ticker"||lt==="rollV")){ renderMarquee(d,data,lt==="rollV"); return; }
     if(marqOn){ marqOn=false; buildContent(d); }   // ticker turned off -> restore normal nodes
     if(t==="scripture"){
@@ -2133,6 +2160,11 @@ function createStage(scaler,opts){
         if(c.includes("e"))w=orig.w+dx; if(c.includes("s"))h=orig.h+dy;
         if(c.includes("w")){w=orig.w-dx;x=orig.x+dx;} if(c.includes("n")){h=orig.h-dy;y=orig.y+dy;}
         w=Math.max(80,w); h=Math.max(50,h);
+        // Clamp to the stage like the move branch already does. Without this a resize
+        // could push an element off the 1920x1080 frame into a position the inspector
+        // sliders (which are bounded to the stage) could not represent or recover.
+        w=Math.min(w,STAGE_W); h=Math.min(h,STAGE_H);
+        x=clampN(x,0,STAGE_W-w); y=clampN(y,0,STAGE_H-h);
         L.x=Math.round(x); L.y=Math.round(y); L.w=Math.round(w); L.h=Math.round(h); }
       r.applyLayout(d);
     });
@@ -2685,6 +2717,10 @@ if(!isOutput){
     rows.push(el("div",{class:"gh",text:"Move when a slide fires (dock)"}));
     rows.push(rowToggle("Shift to a second position while another element is active",!!dk.on,(v)=>{dk.on=v;onCh();renderPanels();}));
     if(dk.on){
+      // The dropdown DISPLAYS the first option when dk.to is unset, but nothing ever
+      // wrote it back — so a dock configured with the shown default silently never
+      // fired while the inspector looked correctly armed. Commit what is displayed.
+      if(opts.length && !dk.to){ dk.to=opts[0][0]; onCh(); }
       rows.push(opts.length?rowSelect("Triggered by",dk.to||(opts[0]&&opts[0][0]),opts,(v)=>{dk.to=v;onCh();})
                            :el("p",{class:"hint",text:"Add another element (e.g. a Scripture) to use as the trigger."}));
       rows.push(el("p",{class:"hint",text:"Home = the X/Y/Size above. Docked = the position below, used only while the trigger is on screen. Fire a sample verse to preview it."}));
@@ -2708,7 +2744,14 @@ if(!isOutput){
       (v)=>{lp.type=v;onCh();renderPanels();}) ];
     if(lp.type!=="none"){
       const fast=(lp.type==="ticker"||lp.type==="rollV"||lp.type==="spin"||lp.type==="shine"||lp.type==="gradientShift");
-      rows.push(rowRange(fast?"Cycle seconds":"Speed (slower \u2192 faster cycle)",lp.speed,fast?4:1.5,fast?40:12,0.5,"s",(v)=>{lp.speed=v;onCh();}));
+      const lo=fast?4:1.5, hi=fast?40:12;
+      // The two motion families use different speed ranges. Switching type only
+      // re-rendered the slider, so a stored 2s carried into the 4-40s range: the thumb
+      // pinned to the minimum while the VALUE stayed 2, and the readout disagreed with
+      // the motion. Clamp the stored value into the range that now applies.
+      if(lp.speed==null||lp.speed<lo||lp.speed>hi){
+        lp.speed=Math.max(lo,Math.min(hi,lp.speed==null?(fast?12:6):lp.speed)); onCh(); }
+      rows.push(rowRange(fast?"Cycle seconds":"Speed (slower \u2192 faster cycle)",lp.speed,lo,hi,0.5,"s",(v)=>{lp.speed=v;onCh();}));
       if(lp.type==="glow"){
         rows.push(rowSelect("Glow color",lp.colorMode||"accent",[["accent","Match accent bar"],["single","Single color\u2026"],["dual","Two colors\u2026"],["rainbow","Rainbow cycle"]],(v)=>{lp.colorMode=v;onCh();renderPanels();}));
         if(lp.colorMode==="single") rows.push(rowColor("Color",lp.color,(v)=>{lp.color=v;onCh();}));
@@ -2802,8 +2845,13 @@ if(!isOutput){
         typeGroup("Item style",st.item,onCh),
         el("div",{class:"row"},[
           el("button",{class:"btn ghost sm",style:"flex:1",text:"Add test verse",onclick:()=>{const arr=["John 1:1","Psalm 46:1","Isaiah 40:31","Matthew 5:9","Romans 12:2","Philippians 4:13"];pushLog(arr[Math.floor(Math.random()*arr.length)]);}}),
-          el("button",{class:"btn ghost sm",style:"flex:1",text:"Clear log",onclick:()=>clearLog()})
-        ])
+          // Use the same publish path as the Connection panel's "Clear scripture list
+          // now". Calling clearLog() alone only emptied the CONSOLE's copy — the OBS
+          // output keeps its own list, so the operator cleared it here and it stayed up
+          // on air.
+          el("button",{class:"btn ghost sm",style:"flex:1",text:"Clear log",onclick:()=>manualClearList()})
+        ]),
+        el("p",{class:"hint",text:"“Add test verse” is a builder aid — it fills the local log so you can style the list. Only the live ProPresenter feed puts verses on air."})
       ]);
     }
     if(t==="eventList"){
@@ -2907,7 +2955,11 @@ if(!isOutput){
         (cn.clearRule==="layer")?rowSelect("\u2026this layer turns off",cn.clearLayer||"media",
           [["media","Media"],["props","Props"],["messages","Messages"],["announcements","Announcements"],["video_input","Video input"],["audio","Audio"]],
           (v)=>{cn.clearLayer=v;savePreview();}):null,
-        el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"}),
+        // renderPanels() rebuilds this node empty, so the live readout vanished the
+        // moment you changed the rule — exactly when the panel tells you to watch it.
+        // Repaint from the cached signals as soon as the new node is in the document.
+        (function(){ const n=el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"});
+          setTimeout(()=>{ try{ renderClearDiag(); }catch(e){} },0); return n; })(),
         el("div",{class:"row"},[el("button",{class:"btn sm full",text:"Clear scripture list now",onclick:()=>{manualClearList();}})]),
         el("p",{class:"hint",html:"<b>Presentation cleared</b> (recommended) keeps the header up on Clear Slide and removes it on Clear All. Changes reach the OBS output after the next <b>Take</b>."})
       ])
@@ -3313,7 +3365,10 @@ if(!isOutput){
       const fol=el("div",{class:"folder"});
       const fh=el("div",{class:"fh"},[
         el("span",{class:"fico",html:svg("folder")}),
-        el("span",{class:"fn",text:f.name+"  ("+f.items.length+")",onclick:()=>{f._open=!f._open;renderPanels();}}),
+        // _open starts undefined and the render below treats undefined as OPEN, so
+        // `!undefined` was true and the first click "opened" an already-open folder —
+        // it took two clicks to collapse. Normalise against how it actually renders.
+        el("span",{class:"fn",text:f.name+"  ("+f.items.length+")",onclick:()=>{f._open=(f._open===false);renderPanels();}}),
         iconBtn("save","Save current preview into this folder",()=>savePresetTo(fi)),
         iconBtn("pencil","Rename folder",()=>{askText("Folder name:",f.name,"Rename").then(n=>{if(n){f.name=n;savePresets(presets);renderPanels();}});}),
         iconBtn("trash","Delete folder",()=>{if(confirm("Delete folder + its presets?")){presets.folders.splice(fi,1);savePresets(presets);renderPanels();}},"danger")
