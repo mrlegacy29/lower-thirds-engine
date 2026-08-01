@@ -656,7 +656,10 @@ function createBus(){
   let bc=null; try{bc=new BroadcastChannel("pplt");}catch(e){}
   function connectSSE(){
     try{
-      es=new EventSource(relayBase()+"/events");
+      // Declare which kind of client this is. The console subscribes to /events too,
+      // so without a role the relay would count the console as a connected output and
+      // the OBS lamp would read green with nothing actually on air.
+      es=new EventSource(relayBase()+"/events?role="+(isOutputMode()?"output":"console"));
       es.onmessage=(ev)=>{ try{const d=JSON.parse(ev.data); if(d&&d.type==="program"&&onProg)onProg(d.cfg);}catch(e){} };
       es.onopen=()=>{ relayOk=true; statusCb&&statusCb(true); };
       es.onerror=()=>{ relayOk=false; statusCb&&statusCb(false); };
@@ -1318,7 +1321,9 @@ function fitScaler(scaler,container){ const cw=container.clientWidth,ch=containe
   const s=Math.min(cw/STAGE_W,ch/STAGE_H); scaler.style.transform=`translate(-50%,-50%) scale(${s})`; return s; }
 
 /* ============================================================= MODE SWITCH */
-const isOutput = /(^|[?&])view=output/.test(location.search) || /(^|#)output/.test(location.hash) || /\/output\/?$/.test(location.pathname);
+// Function declaration (hoisted) so createBus() can use it before this line runs.
+function isOutputMode(){ return /(^|[?&])view=output/.test(location.search) || /(^|#)output/.test(location.hash) || /\/output\/?$/.test(location.pathname); }
+const isOutput = isOutputMode();
 
 function applyBg(rootEl,bg){ rootEl.classList.remove("bg-green","bg-black","green","black");
   if(bg==="green")rootEl.classList.add(rootEl===document.body?"bg-green":"green");
@@ -1984,8 +1989,61 @@ if(!isOutput){
       rowSeg("Background",preview.out.bg,[["transparent","Transparent"],["green","Chroma green"],["black","Black"]],(v)=>{preview.out.bg=v;applyPreview();}),
       el("p",{class:"hint",html:"<b>Transparent</b> for an OBS Browser Source (keys itself) and for <b>SDI fill + key</b> below. <b>Chroma green</b> / <b>Black</b> only if you luma/chroma key instead."}),
       rowToggle("Show safe-area guides in preview",preview.out.safe,(v)=>{preview.out.safe=v;applyPreview();}),
+      obsGroup(),
       sdiGroup()
     ],false,"output");
+  }
+
+  /* ---- destination 1: OBS Browser Source ----
+     Always available and always on — the relay serves /output whether or not any
+     SDI hardware exists. This lamp answers "is OBS actually attached?", which the
+     relay can genuinely tell us: it counts live SSE subscribers. */
+  let obsPoll=null;
+  function obsGroup(){
+    const stat=el("div",{id:"obsStat"});
+    const box=el("div",{class:"grp",id:"obsGrp"},[
+      el("div",{class:"gh",text:"OBS Browser Source"}),
+      stat,
+      el("p",{class:"hint",html:"Add a <b>Browser</b> source in OBS at the URL in the top bar, 1920&times;1080, and turn <b>OFF</b> “Shutdown source when not visible”."})
+    ]);
+    startObsPoll(stat);
+    return box;
+  }
+  // Holds the node itself rather than looking it up by id, and defers the first
+  // tick: obsGroup() runs while the panel is still being BUILT, so at that moment
+  // the node isn't in the document yet and an id lookup would come back empty.
+  function startObsPoll(node){
+    if(obsPoll){ clearInterval(obsPoll); obsPoll=null; }   // never stack timers across re-renders
+    const tick=async()=>{
+      if(!node || !node.isConnected){ clearInterval(obsPoll); obsPoll=null; return; }  // panel rebuilt
+      let s=null;
+      if(SERVED){ try{ const r=await fetch(relayBase()+"/status",{cache:"no-store"}); if(r.ok) s=await r.json(); }catch(e){} }
+      paintObsStatus(s,node);
+    };
+    obsPoll=setInterval(tick,2000);
+    setTimeout(tick,0);            // after the group is appended
+  }
+  function paintObsStatus(s,node){
+    const n=node||$("obsStat"); if(!n)return;
+    n.innerHTML="";
+    const lamp=(c)=>el("span",{style:"width:11px;height:11px;border-radius:50%;flex:0 0 auto;background:"+c+";box-shadow:0 0 10px "+c});
+    let col,head,sub;
+    if(!SERVED){
+      col=SDI_LAMP.amber; head="FILE MODE"; sub="Opened straight from disk — use the Baked URL, or run the desktop app / relay for live updates.";
+    } else if(!s){
+      col=SDI_LAMP.red; head="RELAY UNREACHABLE"; sub="The local server isn't answering. Restart the app.";
+    } else if(!s.clients){
+      col=SDI_LAMP.red; head="NO OUTPUT CONNECTED"; sub="Nothing is subscribed yet — add the Browser source in OBS (or open the output in a browser to test).";
+    } else {
+      col=SDI_LAMP.green; head="OBS CONNECTED"; sub=s.clients+" output"+(s.clients===1?"":"s")+" subscribed"+(s.hasProgram?" · program loaded":" · press TAKE to send a look");
+    }
+    const pill=el("div",{style:"display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:10px;"+
+      "background:"+col.bg+";border:1px solid "+col.bd});
+    pill.append(lamp(col.dot));
+    const t=el("div",{style:"font-size:12px;font-weight:700;color:"+col.ink}); t.append(document.createTextNode(head));
+    const d=el("div",{style:"font-size:11px;color:var(--muted);margin-top:1px"}); d.append(document.createTextNode(sub));
+    const colw=el("div",{style:"min-width:0"}); colw.append(t,d);
+    pill.append(colw); n.append(pill);
   }
 
   /* ---- SDI fill + key (DeckLink) ----

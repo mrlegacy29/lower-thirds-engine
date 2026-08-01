@@ -13,7 +13,7 @@ const path = require("path");
 const relay = require("./relay");
 // DeckLink fill+key output. Self-contained and fail-soft: if the optional native
 // bridge isn't present it reports an actionable status instead of throwing, so a
-// booth without a card (or without the SDK) is completely unaffected.
+// stream PC without a card (or without the SDK) is completely unaffected.
 let sdi = null;
 try { sdi = require("./sdi"); } catch (e) { sdi = null; }
 
@@ -117,7 +117,7 @@ function pushUpdateState() {
 function setupUpdater() {
   if (!autoUpdater) return;
   autoUpdater.autoDownload = true;            // download in the background once found
-  // Do NOT auto-apply on quit: a live booth shouldn't have its version swapped
+  // Do NOT auto-apply on quit: a live stream PC shouldn't have its version swapped
   // between Saturday-night close and Sunday service. Install only on the explicit
   // "Restart & Install" click (ipcMain "updater:install" -> quitAndInstall).
   autoUpdater.autoInstallOnAppQuit = false;

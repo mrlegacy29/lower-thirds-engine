@@ -5,7 +5,7 @@
 //      SDI group is gated on window.ltDesktop, so with no desktop bridge it must not
 //      render and must not throw.
 //   2. The status lamp has to name the FAULT, not just go red — that is the entire point
-//      of the feature for an operator standing at a booth.
+//      of the feature for an operator standing at the stream PC.
 //   3. SDI settings must live in their OWN localStorage key, never in the config. The card
 //      and video mode are per-machine plumbing; if they leaked into the config they would
 //      travel in a Take and light the TAKE button as "pending" on every machine.

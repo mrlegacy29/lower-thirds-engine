@@ -40,23 +40,53 @@ card in step 5 and leave ProPresenter alone.
 
 ---
 
-## 1. Install the DeckLink bridge (one time)
+## 1. The native bridge — current state, read before you try
 
-The app talks to the card through `macadam`, which must be compiled against Blackmagic's
-SDK. It is deliberately **not** a normal dependency — it can't build without the SDK, and a
-failed build must never be able to break a release.
+The app drives the card through `macadam`, a native Node module. It is deliberately **not**
+a normal dependency: a native build that fails must never be able to break a release.
 
-1. Blackmagic **Desktop Video** is already installed (it's driving your card today).
-2. Download the **Desktop Video SDK** from <https://www.blackmagicdesign.com/support>.
-3. Unzip it, then:
+**As of 2026-08-01 it does not build here, and the reason is not what you'd expect.** It is
+*not* the Blackmagic SDK — macadam vendors the DeckLink headers. It's a **Node version**
+problem:
 
-```bash
-set BLACKMAGIC_SDK_PATH=C:\path\to\Blackmagic DeckLink SDK
-npm install macadam
+```
+error C2664: 'napi_status napi_create_external(...)':
+  cannot convert argument 3 from 'void (__cdecl *)(napi_env,void *,void *)'
+  to 'node_api_basic_finalize'
 ```
 
-Until this is done the app's SDI panel tells you exactly this, and offers the OBS fallback
-instead of failing silently.
+macadam uses a pre-Node-22 N-API finalize signature. This app runs **Node 24** (Electron 42
+bundles Node 24.16.0), whose headers reject it. Building against Electron instead of system
+Node does *not* help — same Node version. And every published fork is stale:
+
+| Package | Version | Last published |
+|---|---|---|
+| `macadam` | 2.0.18 | Jun 2022 |
+| `@rezonant/macadam` | 2.0.19 | Apr 2022 |
+| `@byslin/macadam` | 2.0.14 | Apr 2022 |
+
+`sdi.js` tries all three, so if any of them is ever fixed — or you patch one locally — it
+gets picked up with no code change.
+
+Fixing it means patching the module's N-API calls and rebuilding for Electron's ABI
+(`abi 146`). That's worth doing at the stream PC where the card is present to test against;
+it is not worth doing blind.
+
+### Until then, use OBS — it does the same job today
+
+OBS has DeckLink output with an external keyer built in (core, not a plugin):
+
+1. **Browser** source → the output URL, 1920×1080
+2. **Settings → Advanced → Color Format = `RGB`** ← without this there is no alpha
+3. **Tools → DeckLink Output** → your device, matching video mode, **Keyer = `External`**
+
+Same cables, same ATEM setup as everything below — steps 2, 3, 4, 7 and 8 all still apply.
+The only catch is that OBS sends its **whole program mix** out the card, so that OBS instance
+must contain *only* the graphics. If it's also compositing camera for the stream, run a
+second OBS instance for the key.
+
+The app's SDI panel shows exactly this guidance when the bridge is missing, rather than
+failing silently.
 
 ---
 

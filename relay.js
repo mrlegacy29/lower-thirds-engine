@@ -44,16 +44,40 @@ function createServer(htmlFile) {
         "<h1>App HTML not found</h1><p>Expected at: " + htmlFile + "</p>");
     }
   }
-  function cors(res) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+  /* ----- origin policy -------------------------------------------------------
+     This used to answer every route with Access-Control-Allow-Origin: *, which
+     meant ANY web page open on the stream PC could POST /config and put its own
+     text on air mid-service, and could read church-LAN hosts back through /pp.
+     Both were reproduced against the running relay.
+
+     CORS alone does NOT fix a state-changing POST — the browser blocks reading
+     the RESPONSE, but the write has already happened. So /config POST is gated
+     on the origin itself and answers 403.
+
+     Allowed: no Origin header (same-origin navigations, OBS, curl, the tests)
+     and loopback origins. "null" (file:// and sandboxed iframes) is refused for
+     writes, because any hostile page can produce it from a sandboxed frame. */
+  const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+  function originOf(req) { return (req && req.headers && req.headers.origin) || ""; }
+  function originAllowed(req) { const o = originOf(req); return !o || LOCAL_ORIGIN.test(o); }
+  function cors(res, req) {
+    const o = originOf(req);
+    // Echo the origin only when it is local; otherwise send no ACAO at all so a
+    // remote page cannot read the body.
+    if (o && LOCAL_ORIGIN.test(o)) res.setHeader("Access-Control-Allow-Origin", o);
+    res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+  function deny(res, why) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "forbidden", detail: why }));
   }
   function broadcast(cfg) {
     const payload = "data: " + JSON.stringify({ type: "program", cfg }) + "\n\n";
     for (const res of sseClients) { try { res.write(payload); } catch (e) {} }
   }
-  function proxyPP(target, res) {
+  function proxyPP(target, res, req) {
     let t;
     try { t = new url.URL(target); } catch (e) { res.writeHead(400); return res.end("bad target"); }
     if (t.protocol !== "http:") { res.writeHead(400); return res.end("http only"); }
@@ -63,11 +87,17 @@ function createServer(htmlFile) {
     // would crash the relay and take the OBS output offline mid-service.
     const fail = () => {
       if (res.headersSent) { try { res.end(); } catch (e) {} return; }
-      try { cors(res); res.writeHead(502, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "pp unreachable" })); } catch (e) {}
+      try { cors(res, req); res.writeHead(502, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "pp unreachable" })); } catch (e) {}
     };
     const preq = http.request(opts, (pres) => {
-      cors(res);
-      res.writeHead(pres.statusCode || 502, { "Content-Type": pres.headers["content-type"] || "application/json" });
+      cors(res, req);
+      // Always application/json, never the upstream's Content-Type. Echoing it let
+      // any http:// host serve HTML/JS on the relay's OWN origin, which would put
+      // attacker script next to the console's localStorage.
+      res.writeHead(pres.statusCode || 502, {
+        "Content-Type": "application/json",
+        "X-Content-Type-Options": "nosniff",
+      });
       pres.on("error", () => { try { res.destroy(); } catch (e) {} });   // upstream tore down mid-body
       pres.pipe(res);
     });
@@ -80,7 +110,7 @@ function createServer(htmlFile) {
     const u = url.parse(req.url, true);
     const p = u.pathname;
 
-    if (req.method === "OPTIONS") { cors(res); res.writeHead(204); return res.end(); }
+    if (req.method === "OPTIONS") { cors(res, req); res.writeHead(204); return res.end(); }
 
     if (req.method === "GET" && (p === "/" || p === "/index.html")) {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -91,32 +121,75 @@ function createServer(htmlFile) {
       return res.end(readHtml());
     }
     if (p === "/config" && req.method === "GET") {
-      cors(res); res.writeHead(200, { "Content-Type": "application/json" });
+      cors(res, req); res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(programConfig || {}));
     }
     if (p === "/config" && req.method === "POST") {
-      let body = "";
-      req.on("data", (c) => { body += c; if (body.length > 5e6) req.destroy(); });
+      // Gate the WRITE, not just the response read — see the origin policy above.
+      if (!originAllowed(req)) return deny(res, "cross-origin write to /config");
+      // Buffer as Buffers and decode once. Concatenating chunks into a string
+      // decoded each chunk independently, so any multi-byte character split
+      // across a 64KB socket boundary became U+FFFD and went to air corrupted.
+      const chunks = []; let len = 0; let tooBig = false;
+      req.on("data", (c) => {
+        len += c.length;
+        if (len > 5e6) { tooBig = true; req.destroy(); return; }
+        chunks.push(c);
+      });
+      req.on("aborted", () => { /* client gave up; nothing to answer */ });
       req.on("end", () => {
-        try { programConfig = JSON.parse(body); broadcast(programConfig); } catch (e) {}
-        cors(res); res.writeHead(200, { "Content-Type": "application/json" });
-        res.end('{"ok":true}');
+        if (tooBig) {
+          cors(res, req); res.writeHead(413, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "config too large", limit: 5e6 }));
+        }
+        let ok = true, detail = null;
+        try { programConfig = JSON.parse(Buffer.concat(chunks).toString("utf8")); broadcast(programConfig); }
+        catch (e) { ok = false; detail = String((e && e.message) || e); }
+        cors(res, req);
+        // Report a parse failure honestly. Answering 200 made a failed Take look
+        // like a successful one, so the console said "ON AIR" with nothing sent.
+        res.writeHead(ok ? 200 : 400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(ok ? { ok: true } : { ok: false, error: "bad json", detail }));
       });
       return;
     }
+    // Lightweight health probe for the console: how many outputs (OBS browser
+    // sources / output tabs) are actually subscribed right now.
+    if (p === "/status" && req.method === "GET") {
+      // Count OUTPUTS separately from consoles. The console subscribes to /events
+      // as well, so a raw client count would show "connected" with nothing on air.
+      let outputs = 0;
+      for (const c of sseClients) if (c._role === "output") outputs++;
+      cors(res, req); res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({
+        ok: true,
+        clients: outputs,                 // what the OBS lamp reads
+        totalClients: sseClients.size,
+        consoles: sseClients.size - outputs,
+        hasProgram: !!programConfig,
+        uptime: Math.round(process.uptime()),
+      }));
+    }
     if (p === "/events" && req.method === "GET") {
-      cors(res);
+      cors(res, req);
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
       res.write("retry: 2000\n\n");
       if (programConfig) res.write("data: " + JSON.stringify({ type: "program", cfg: programConfig }) + "\n\n");
+      // Default to "output": an OBS Browser Source added before this change (or any
+      // third-party consumer) has no role param, and it IS an output.
+      res._role = (u.query.role === "console") ? "console" : "output";
       sseClients.add(res);
       const ka = setInterval(() => { try { res.write(": ping\n\n"); } catch (e) {} }, 25000);
       req.on("close", () => { clearInterval(ka); sseClients.delete(res); });
       return;
     }
     if (p === "/pp" && req.method === "GET") {
+      // The proxy can reach any http host the stream PC can. With a wildcard CORS
+      // header a remote page could use it to read church-LAN devices, so it is
+      // restricted to local callers like /config.
+      if (!originAllowed(req)) return deny(res, "cross-origin use of the ProPresenter proxy");
       if (!u.query.target) { res.writeHead(400); return res.end("missing target"); }
-      return proxyPP(u.query.target, res);
+      return proxyPP(u.query.target, res, req);
     }
     res.writeHead(404); res.end("not found");
   });

@@ -143,7 +143,7 @@ That's it. No re-sending files by hand.
       add `win.certificateFile` / password (or an EV cert) to the build config.
 - [ ] **Port 7777** — if another app uses it, change `PORT` in **both**
       `main.js` and `relay.js`, and re-point OBS to the new `/output` URL.
-- [ ] **Test on the booth PC** — install the `.exe`, run a full ProPresenter →
+- [ ] **Test on the stream PC** — install the `.exe`, run a full ProPresenter →
       OBS pass before relying on it for a service.
 - [ ] **Private source?** If you ever want the code private but keep updates
       working: make a **second public repo** for releases only and point

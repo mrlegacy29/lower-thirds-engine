@@ -40,10 +40,15 @@
 let BrowserWindow = null;
 try { ({ BrowserWindow } = require("electron")); } catch (e) { BrowserWindow = null; }
 
-let macadam = null;
-let loadError = null;
-try { macadam = require("macadam"); }
-catch (e) { loadError = String((e && e.message) || e); }
+// Try the upstream package and its known forks, so whichever one is made to build
+// on this machine gets picked up without a code change. All of them expose the same
+// playback()/keying API.
+const BRIDGES = ["macadam", "@rezonant/macadam", "@byslin/macadam"];
+let macadam = null, bridgeName = null, loadError = null;
+for (const name of BRIDGES) {
+  try { macadam = require(name); bridgeName = name; loadError = null; break; }
+  catch (e) { if (!loadError) loadError = String((e && e.message) || e); }
+}
 
 /* ---------------------------------------------------------------- video modes
    fps is the RENDER rate for the offscreen page. For interlaced modes that is
@@ -84,15 +89,20 @@ let deviceCaps = null;   // what the selected card says it can do (external keyi
 const notify = () => { try { onChange && onChange(status()); } catch (e) {} };
 
 function available() {
-  if (macadam) return { ok: true };
+  if (macadam) return { ok: true, bridge: bridgeName };
   return {
     ok: false,
     reason:
-      "The DeckLink bridge (macadam) isn't installed. It has to be compiled against " +
-      "Blackmagic's Desktop Video SDK:\n" +
-      "  1. Install Blackmagic Desktop Video (the same install that already drives your card)\n" +
-      "  2. Download the Desktop Video SDK from blackmagicdesign.com/support\n" +
-      "  3. Set BLACKMAGIC_SDK_PATH to the SDK folder, then:  npm install macadam\n" +
+      "The DeckLink bridge isn't installed, so SDI fill + key is unavailable.\n\n" +
+      "It is a native module (macadam) that must compile on this machine. As of the last\n" +
+      "check every published build dates from 2022 and does NOT compile against Node 24,\n" +
+      "which is what this app runs — it fails on the N-API finalize signature, not on\n" +
+      "anything to do with Blackmagic. See SDI-SETUP.md for the current state and the\n" +
+      "workaround.\n\n" +
+      "USE OBS INSTEAD — it drives the same card today, no compiling:\n" +
+      "  1. Browser source -> the output URL, 1920x1080\n" +
+      "  2. Settings > Advanced > Color Format = RGB   (without this there is no alpha)\n" +
+      "  3. Tools > DeckLink Output -> your device, matching mode, Keyer = External\n" +
       (loadError ? "\nLoad error: " + loadError : ""),
   };
 }
