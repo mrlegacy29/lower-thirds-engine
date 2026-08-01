@@ -16,6 +16,20 @@ contextBridge.exposeInMainWorld("ltDesktop", {
   checkForUpdates: () => ipcRenderer.send("updater:check"),
   installUpdate: () => ipcRenderer.send("updater:install"),
   onUpdate: (cb) => ipcRenderer.on("updater:status", (_e, s) => { try { cb(s); } catch (e) {} }),
+
+  // DeckLink fill + key. Present only in the desktop app — lt.html feature-detects
+  // this, so the same file still runs in a plain browser and in OBS.
+  sdi: {
+    status:  () => ipcRenderer.invoke("sdi:status"),
+    modes:   () => ipcRenderer.invoke("sdi:modes"),
+    devices: () => ipcRenderer.invoke("sdi:devices"),
+    start:   (opts) => ipcRenderer.invoke("sdi:start", opts),
+    stop:    () => ipcRenderer.invoke("sdi:stop"),
+    setLevel:(v) => ipcRenderer.invoke("sdi:level", v),
+    ramp:    (dir, frames) => ipcRenderer.send("sdi:ramp", dir, frames),
+    test:    (seconds) => ipcRenderer.invoke("sdi:test", seconds),
+    onStatus:(cb) => ipcRenderer.on("sdi:status", (_e, s) => { try { cb(s); } catch (e) {} }),
+  },
 });
 
 /* ---------------- update banner (injected, dark, top-center) ---------------- */

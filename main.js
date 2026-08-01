@@ -11,6 +11,11 @@
 const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require("electron");
 const path = require("path");
 const relay = require("./relay");
+// DeckLink fill+key output. Self-contained and fail-soft: if the optional native
+// bridge isn't present it reports an actionable status instead of throwing, so a
+// booth without a card (or without the SDK) is completely unaffected.
+let sdi = null;
+try { sdi = require("./sdi"); } catch (e) { sdi = null; }
 
 // electron-updater / electron-log are optional at dev-time; guard so `npm start`
 // works even before a publish target is configured.
@@ -53,6 +58,8 @@ function boot() {
     createWindow();
     buildMenu();
     setupUpdater();
+    // live SDI status -> console (frame counter, key level, faults)
+    if (sdi) sdi.onStatus((s) => { if (win && !win.isDestroyed()) win.webContents.send("sdi:status", s); });
     // check for updates shortly after launch, then every 5 minutes while running
     // (packaged builds only). Both are background checks, so a failed check stays quiet.
     if (app.isPackaged && autoUpdater) {
@@ -131,6 +138,33 @@ ipcMain.on("updater:check", () => {
 ipcMain.on("updater:install", () => { if (autoUpdater) { try { autoUpdater.quitAndInstall(); } catch (e) {} } });
 ipcMain.handle("app:info", () => ({ version: app.getVersion(), name: app.getName(), port: PORT, packaged: app.isPackaged }));
 
+/* ----- DeckLink SDI fill + key -----
+   Every handler answers with a plain object rather than rejecting, so a renderer
+   mid-service never has to deal with an exception on a hardware call. */
+function sdiUnavailable() {
+  return { supported: false, on: false, reason: "SDI output module failed to load.", frames: 0, dropped: 0 };
+}
+ipcMain.handle("sdi:status",  () => (sdi ? sdi.status() : sdiUnavailable()));
+ipcMain.handle("sdi:modes",   () => (sdi ? sdi.modes() : []));
+ipcMain.handle("sdi:devices", async () => (sdi ? await sdi.listDevices() : []));
+ipcMain.handle("sdi:start",   async (_e, opts) => {
+  if (!sdi) return sdiUnavailable();
+  try {
+    const o = Object.assign({}, opts, { url: "http://localhost:" + PORT + "/output" });
+    return await sdi.start(o);
+  } catch (e) { return sdi.status(); }   // status already carries the human-readable error
+});
+ipcMain.handle("sdi:stop",  async () => { if (!sdi) return sdiUnavailable(); try { return await sdi.stop(); } catch (e) { return sdi.status(); } });
+ipcMain.handle("sdi:level", (_e, v) => { if (!sdi) return sdiUnavailable(); try { sdi.setLevel(v); } catch (e) {} return sdi.status(); });
+ipcMain.on("sdi:ramp", (_e, dir, frames) => {
+  if (!sdi) return;
+  try { dir === "down" ? sdi.rampDown(frames) : sdi.rampUp(frames); } catch (e) {}
+});
+ipcMain.handle("sdi:test", async (_e, seconds) => {
+  if (!sdi) return sdiUnavailable();
+  try { return await sdi.testPattern(seconds); } catch (e) { return sdi.status(); }
+});
+
 function buildMenu() {
   const isMac = process.platform === "darwin";
   const template = [
@@ -194,6 +228,11 @@ function buildMenu() {
 // Tear the relay down only on real quit (Windows: window close => quit => here).
 // On macOS the app stays alive in the dock with the relay still serving OBS, so
 // re-activating reopens a window pointed at a live server (not a dead port).
-app.on("before-quit", () => { try { if (relayServer) relayServer.close(); } catch (e) {} relayServer = null; });
+// Release the DeckLink before the relay: the card is an exclusive resource, and
+// leaving it open would block the next launch (or ProPresenter) from claiming it.
+app.on("before-quit", () => {
+  try { if (sdi) sdi.stop(); } catch (e) {}
+  try { if (relayServer) relayServer.close(); } catch (e) {} relayServer = null;
+});
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

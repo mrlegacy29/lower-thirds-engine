@@ -10,10 +10,11 @@ file; Electron hosts it plus a tiny relay and adds auto-update.
 |------|------|----------|
 | `lt.html` | **THE app.** All operator-console + OBS-output UI, rendering, ProPresenter polling, Take/Program logic, every element type and control. ~123 KB, single file (HTML + CSS + JS). | **Yes — this is where features live.** |
 | `relay.js` | Tiny local HTTP server. Serves `lt.html` at `/` and `/output`, relays config console→OBS over SSE, proxies ProPresenter (kills CORS). Exports `start()` so Electron hosts it in-process; also runs standalone via `node relay.js`. | Rarely. It's stable. |
-| `main.js` | Electron main process. Starts the relay in-process on port **7777**, opens the console window, wires `electron-updater` (GitHub Releases), builds the menu. | For app-shell behavior only. |
+| `main.js` | Electron main process. Starts the relay in-process on port **7777**, opens the console window, wires `electron-updater` (GitHub Releases), builds the menu, and exposes the SDI IPC. | For app-shell behavior only. |
+| `sdi.js` | **DeckLink fill + key output.** Renders `/output` in an offscreen window (BGRA, which is exactly DeckLink's keying format) and pumps it to the card via the optional `macadam` bridge, newest-frame-wins. Also computes the console's red/amber/green health lamp. Fail-soft: with no bridge/card it reports an actionable status and nothing else is affected. See `SDI-SETUP.md`. | Only for SDI/keying work. |
 | `preload.js` | Injects the "Update available" banner into the page and bridges updater IPC. Keeps `lt.html` clean (banner only appears in the desktop app). | For update-UI tweaks. |
 | `build/icon.ico` / `icon.png` | App icon. | Replace if you want different art. |
-| `test/*.js` + `test/run-all.js` | 9 jsdom suites covering every control, clear-detection (F1/F2), media/motion, layering/dock, operator mode, take-state, glow/shape/bevel. | Add a suite when you add a feature. |
+| `test/*.js` + `test/run-all.js` | 16 jsdom suites covering every control, clear-detection (F1/F2), media/motion, layering/dock, operator mode, take-state, glow/shape/bevel, source fallback across both render paths, and the SDI surface. | Add a suite when you add a feature. |
 | `.github/workflows/release.yml` | On a `v*` tag push: install → test → build Windows installer → publish GitHub Release. | Rarely. |
 
 ## Architecture in one paragraph
@@ -36,14 +37,14 @@ GitHub for updates.
    port without a reason; if you must, update `PORT` in both `main.js` and
    `relay.js` and tell the user to re-point OBS.
 3. **Always run `npm test` before building or releasing.** `run-all.js`
-   syntax-checks `lt.html` and runs all 9 suites. Green = safe to ship.
+   syntax-checks `lt.html` and runs all 16 suites. Green = safe to ship.
 4. **One source of truth.** There's no build step for `lt.html`; it ships as-is.
 
 ## Common commands
 
 ```bash
 npm install      # first time (pulls electron + electron-builder + updater)
-npm test         # syntax-check lt.html + run all 9 suites  (MUST be green)
+npm test         # syntax-check lt.html + run all 16 suites  (MUST be green)
 npm start        # run the desktop app locally (dev)
 npm run dist     # build a Windows installer locally, no publish  -> release/
 npm run release  # build + publish to GitHub Releases (needs GH_TOKEN)

@@ -436,7 +436,10 @@ function clone(o){return JSON.parse(JSON.stringify(o));}
 function uid(){return 'e'+Math.random().toString(36).slice(2,9);}
 function deepMerge(base,over){const out=clone(base);for(const k in over){
   if(over[k]&&typeof over[k]==='object'&&!Array.isArray(over[k])) out[k]=deepMerge(base[k]||{},over[k]);
-  else out[k]=over[k];} return out;}
+  // Arrays must be CLONED, not aliased. Assigning by reference made a loaded preset share
+  // its elements array with live preview state, so every later edit silently rewrote the
+  // saved preset (and a broadcast config could alias the relay's copy).
+  else out[k]=(Array.isArray(over[k])?clone(over[k]):over[k]);} return out;}
 function el(tag,props,kids){const n=document.createElement(tag);
   if(props)for(const k in props){ if(k==='class')n.className=props[k];
     else if(k==='html')n.innerHTML=props[k]; else if(k==='text')n.textContent=props[k];
@@ -602,17 +605,23 @@ const BOOKS=("Genesis|Exodus|Leviticus|Numbers|Deuteronomy|Joshua|Judges|Ruth|1 
  "Phlm|Heb|Jas|1 Pet|2 Pet|1 Jn|2 Jn|3 Jn|Rev").split("|").map(s=>s.trim());
 BOOKS.sort((a,b)=>b.length-a.length);
 const BOOK_RE=BOOKS.map(b=>b.replace(/ /g,"\\s+").replace(/\./g,"\\.")).join("|");
-const REF_CORE="((?:"+BOOK_RE+")\\.?)\\s+(\\d+)\\s*[:.]\\s*(\\d+)(?:\\s*[\\-\\u2013\\u2014]\\s*(\\d+))?";
-const TR_RE="(?:\\s*\\(?([A-Z]{2,6}\\d?)\\)?)?";
+// The range tail accepts a bare verse (3:16-18) OR a second chapter:verse (1:1-2:3).
+// Without the cross-chapter branch the match stopped after "1:1-2" and the leftover ":3"
+// was painted at the START of the verse body on air.
+const REF_CORE="((?:"+BOOK_RE+")\\.?)\\s+(\\d+)\\s*[:.]\\s*(\\d+)(?:\\s*[\\-\\u2013\\u2014]\\s*(\\d+(?:\\s*[:.]\\s*\\d+)?))?";
+// \d{0,2}, not \d? — real tags carry two digits (NASB95, NIV84). With one digit the regex
+// consumed "NASB9" and left the stray "5" glued to the front of the verse body.
+const TR_RE="(?:\\s*\\(?([A-Z]{2,6}\\d{0,2})\\)?)?";
 const REF_FULL=new RegExp("\\b"+REF_CORE+TR_RE,"i");
 const REF_LINE=new RegExp("^\\s*"+REF_CORE+TR_RE+"\\s*$","i");
 const REF_CORE_ONLY=new RegExp("\\b"+REF_CORE,"i");   // reference without the optional translation tag
 // A real translation tag is UPPERCASE (KJV, NIV, ESV, NASB95). The reference regexes are
 // case-insensitive, so [A-Z]{2,6} also matches lowercase — without this guard the parser
 // eats the first verse word (e.g. "John 3:16 For God..." -> tag "For", body "God...").
-function isTr(s){ return !!s && /^[A-Z]{2,6}\d?$/.test(s); }
+function isTr(s){ return !!s && /^[A-Z]{2,6}\d{0,2}$/.test(s); }
 function tidyRef(m){let book=m[1].replace(/\s+/g," ").replace(/\.$/,"");
-  let r=book+" "+m[2]+":"+m[3]; if(m[4])r+="-"+m[4]; return r;}
+  // m[4] is either "18" or a cross-chapter "2:3" (possibly spaced) — normalise the separator.
+  let r=book+" "+m[2]+":"+m[3]; if(m[4])r+="-"+String(m[4]).replace(/\s*[:.]\s*/,":").replace(/\s+/g,""); return r;}
 function parseScripture(text){
   if(!text)return null; const raw=text.replace(/\r/g,""); const lines=raw.split("\n");
   for(let i=0;i<lines.length;i++){const m=lines[i].match(REF_LINE);
@@ -927,7 +936,13 @@ function makeElRenderer(){
     if(t==="history"||t==="eventList"){ const items=((data&&data.items)||[]).map(x=>x.ref); return items.length?items:[]; }
     return [];
   }
-  function marqStyle(d){ const st=d.style||{}; return st.item||st.text||st.ref||st.title||st.name||styleDefaults(); }
+  // Pick the style bucket that matches what marqText() actually returns for this type.
+  // The old generic fallback chain (item||text||ref||title||name) was wrong for two types:
+  // a scripture ticker scrolls the verse BODY but got st.ref, and a name ticker leads with
+  // the NAME but got st.title — so those elements' real style controls did nothing.
+  const MARQ_STYLE_KEY={scripture:"body",reference:"ref",name:"name",text:"text",sermonTitle:"title",bulletList:"item",history:"item",eventList:"item"};
+  function marqStyle(d){ const st=d.style||{}; const k=MARQ_STYLE_KEY[d.type];
+    return (k&&st[k])||st.item||st.text||st.ref||st.title||st.name||styleDefaults(); }
   function renderMarquee(d,data,vertical){
     const sty=marqStyle(d);
     const parts0=marqText(d,data).filter(s=>s!=="");
@@ -1472,7 +1487,12 @@ if(!isOutput){
   function flashTrans(){ const b=$("btnTrans"); b.classList.add("flashok"); setTimeout(()=>b.classList.remove("flashok"),700); }
   function flash(btn,txt){ const o=btn.textContent; btn.textContent=txt; setTimeout(()=>btn.textContent=o,1300); }
   // Pending vs live state on the TAKE button + Program panel.
-  function cfgSansMeta(c){ const x=clone(c||{}); delete x._take; delete x.conn; return JSON.stringify(x); }
+  // conn is NOT stripped: the OUTPUT page polls ProPresenter using program.conn, so a host/
+  // port/poll/clear-rule edit genuinely is un-taken work. Stripping it left the button saying
+  // "ON AIR" while the output kept polling the old IP and no verse ever reached OBS.
+  // _clearHist IS stripped — it is a fire-and-forget nonce echoed back by the relay's own SSE,
+  // and counting it left TAKE stuck on "pending" after "Clear scripture list now".
+  function cfgSansMeta(c){ const x=clone(c||{}); delete x._take; delete x._clearHist; return JSON.stringify(x); }
   function updateTakeState(){
     const pending = cfgSansMeta(preview)!==cfgSansMeta(program);
     const b=$("btnTrans"); if(b){ b.classList.toggle("pending",pending); b.classList.toggle("synced",!pending);
@@ -1962,9 +1982,143 @@ if(!isOutput){
   function secOutput(){
     return section("Output & keying",[
       rowSeg("Background",preview.out.bg,[["transparent","Transparent"],["green","Chroma green"],["black","Black"]],(v)=>{preview.out.bg=v;applyPreview();}),
-      el("p",{class:"hint",html:"<b>Transparent</b> for an OBS Browser Source (keys itself). <b>Chroma green</b> / <b>Black</b> if you key on the DeckLink/ATEM instead."}),
-      rowToggle("Show safe-area guides in preview",preview.out.safe,(v)=>{preview.out.safe=v;applyPreview();})
+      el("p",{class:"hint",html:"<b>Transparent</b> for an OBS Browser Source (keys itself) and for <b>SDI fill + key</b> below. <b>Chroma green</b> / <b>Black</b> only if you luma/chroma key instead."}),
+      rowToggle("Show safe-area guides in preview",preview.out.safe,(v)=>{preview.out.safe=v;applyPreview();}),
+      sdiGroup()
     ],false,"output");
+  }
+
+  /* ---- SDI fill + key (DeckLink) ----
+     Desktop app only: it drives the card from the Electron main process. In a
+     plain browser / OBS there is no window.ltDesktop, so the whole group is
+     omitted and lt.html keeps working as a standalone file.
+     Settings live in their OWN localStorage key, deliberately NOT in the config:
+     the card and video mode are per-machine plumbing, so they must not travel in
+     a Take or make the TAKE button read "pending". */
+  const LS_SDI="pplt.sdi.v1";
+  const SDI_DEF={deviceIndex:0,mode:"bmdModeHD1080p5994",level:255};
+  function sdiCfg(){ return lsGet(LS_SDI,SDI_DEF); }
+  function saveSdiCfg(c){ lsSet(LS_SDI,c); }
+  function hasSdi(){ return !!(window.ltDesktop && window.ltDesktop.sdi); }
+
+  function sdiGroup(){
+    if(!hasSdi()) return null;
+    // subscribe once: main pushes a status heartbeat (~2s) plus faults
+    if(!sdiGroup._sub){ sdiGroup._sub=true; try{ window.ltDesktop.sdi.onStatus(paintSdiStatus); }catch(e){} }
+    const box=el("div",{class:"grp",id:"sdiGrp"},[
+      el("div",{class:"gh",text:"SDI fill + key — DeckLink → ATEM"}),
+      el("div",{id:"sdiBody"},[el("p",{class:"hint",text:"Checking for a DeckLink…"})])
+    ]);
+    setTimeout(renderSdiPanel,0);   // async: device + mode lists come over IPC
+    return box;
+  }
+
+  async function renderSdiPanel(){
+    const body=$("sdiBody"); if(!body||!hasSdi())return;
+    const api=window.ltDesktop.sdi;
+    let st={},modes=[],devs=[];
+    try{ st=await api.status()||{}; }catch(e){ st={supported:false,reason:String(e&&e.message||e)}; }
+    if(st.supported){ try{ modes=await api.modes()||[]; }catch(e){} try{ devs=await api.devices()||[]; }catch(e){} }
+    body.innerHTML="";
+
+    if(!st.supported){
+      body.append(el("p",{class:"hint",html:"<b>Not available on this machine.</b>"}));
+      body.append(el("pre",{style:"white-space:pre-wrap;font-size:11px;line-height:1.5;color:var(--muted);margin:6px 0 0",text:st.reason||"Unknown reason."}));
+      body.append(el("p",{class:"hint",html:"Until then, OBS can drive the card: add a Browser source pointing at the output URL, set <b>Settings → Advanced → Color Format = RGB</b>, then <b>Tools → DeckLink Output</b> with <b>Keyer = External</b>."}));
+      return;
+    }
+
+    const cfg=sdiCfg();
+    if(devs.length){
+      body.append(rowSelect("DeckLink device",String(cfg.deviceIndex),
+        devs.map(d=>[String(d.index),d.display]),(v)=>{const c=sdiCfg();c.deviceIndex=parseInt(v)||0;saveSdiCfg(c);}));
+    } else {
+      body.append(el("p",{class:"hint",html:"<b>No DeckLink found.</b> Check Blackmagic Desktop Video Setup, and that the card is mapped for keying."}));
+    }
+    body.append(rowSelect("Video mode",cfg.mode,modes.map(m=>[m.id,m.label]),(v)=>{const c=sdiCfg();c.mode=v;saveSdiCfg(c);}));
+    body.append(el("p",{class:"hint",html:"⚠️ Must match the ATEM <b>exactly</b> — a mismatch shows up as flicker or black."}));
+    body.append(rowRange("Key level",cfg.level,0,255,1,"",(v)=>{const c=sdiCfg();c.level=v;saveSdiCfg(c);if(window.ltDesktop.sdi)window.ltDesktop.sdi.setLevel(v);}));
+
+    const btn=el("button",{class:"btn full "+(st.on?"":"primary"),text:st.on?"Stop SDI output":"Start SDI output",
+      onclick:async()=>{ btn.disabled=true;
+        try{ const c=sdiCfg();
+          const s=st.on? await api.stop() : await api.start({deviceIndex:c.deviceIndex,mode:c.mode,level:c.level});
+          paintSdiStatus(s);
+        }catch(e){}
+        btn.disabled=false; renderSdiPanel(); } });
+    const tbtn=el("button",{class:"btn sm full",text:"Send test pattern (10s)",disabled:!st.on,
+      onclick:async()=>{ tbtn.disabled=true; const o=tbtn.textContent; tbtn.textContent="Test card on air…";
+        try{ paintSdiStatus(await api.test(10)); }catch(e){}
+        tbtn.textContent=o; tbtn.disabled=!st.on; renderSdiPanel(); } });
+    body.append(el("div",{class:"row"},[btn]));
+    body.append(el("div",{class:"row"},[tbtn]));
+    body.append(el("p",{class:"hint",html:"The test card shows colour bars with a <b>transparent centre box</b>. On the ATEM multiview the <b>fill</b> input shows the bars in colour and the <b>key</b> input shows a white silhouette on black — that tells you instantly if the two SDI cables are swapped."}));
+    body.append(el("div",{id:"sdiStat",style:"margin-top:6px"}));
+    paintSdiStatus(st);
+
+    body.append(el("p",{class:"hint",html:"On the ATEM keyer: <b>Key Type = Luma</b>, <b>Pre-Multiplied Key ON</b>, Fill + Key sources set to the two SDI inputs from the card."}));
+    body.append(el("p",{class:"hint",html:"The card output is <b>exclusive</b> — if ProPresenter's alpha keyer already holds it, stop that first or use a second card."}));
+  }
+
+  // Built with DOM nodes, never innerHTML: the fault strings come back from the
+  // Blackmagic driver, and esc() lives in the renderer scope and isn't reachable
+  // here. textContent is both correct and immune to markup in those messages.
+  const SDI_LAMP={green:{bg:"#0f3222",bd:"#2f7d55",dot:"#36d07a",ink:"#8ef0b8"},
+                  amber:{bg:"#3a2c0d",bd:"#8a6a22",dot:"#ffb02e",ink:"#ffd489"},
+                  red:  {bg:"#3a1512",bd:"#8a3630",dot:"#ff5b52",ink:"#ff9d96"}};
+  const SDI_MARK={ok:"✓",warn:"!",fail:"✕"};
+  const SDI_MARKC={ok:"#36d07a",warn:"#ffb02e",fail:"#ff5b52"};
+
+  function paintSdiStatus(s){
+    const n=$("sdiStat"); if(!n||!s)return;
+    n.innerHTML="";
+    const h=s.health||{level:s.on?"green":"red",checks:[],summary:s.on?"Sending":"Idle"};
+    const c=SDI_LAMP[h.level]||SDI_LAMP.red;
+
+    // the lamp itself
+    const pill=el("div",{style:"display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:10px;"+
+      "background:"+c.bg+";border:1px solid "+c.bd+";margin-bottom:8px"});
+    pill.append(el("span",{style:"width:11px;height:11px;border-radius:50%;flex:0 0 auto;background:"+c.dot+
+      ";box-shadow:0 0 10px "+c.dot}));
+    const txt=el("div",{style:"font-size:12px;font-weight:700;color:"+c.ink});
+    txt.append(document.createTextNode(
+      h.level==="green"?"KEY + FILL OK":h.level==="amber"?"SENDING — CHECK WARNINGS":"NOT SENDING"));
+    const sub=el("div",{style:"font-size:11px;color:var(--muted);margin-top:1px"});
+    sub.append(document.createTextNode(String(h.summary||"")));
+    const col=el("div",{style:"min-width:0"}); col.append(txt,sub);
+    pill.append(col);
+    n.append(pill);
+
+    // per-check detail, so a fault names itself instead of just going red
+    if(h.checks&&h.checks.length){
+      const list=el("div",{style:"font-size:11px;line-height:1.7"});
+      h.checks.forEach(k=>{
+        const row=el("div",{style:"display:flex;gap:7px;align-items:baseline"});
+        row.append(el("span",{style:"color:"+(SDI_MARKC[k.state]||"#888")+";font-weight:700;width:10px;flex:0 0 auto",
+          text:SDI_MARK[k.state]||"·"}));
+        const lbl=el("span",{style:"color:var(--ink)"}); lbl.append(document.createTextNode(k.label));
+        row.append(lbl);
+        if(k.detail){ const d=el("span",{style:"color:var(--muted)"}); d.append(document.createTextNode("— "+k.detail)); row.append(d); }
+        list.append(row);
+      });
+      n.append(list);
+    }
+
+    if(s.on){
+      const stat=el("div",{style:"font-size:11px;color:var(--muted);font-family:var(--mono,monospace);margin-top:6px"});
+      const bits=[(s.modeLabel||s.mode||""),"key "+s.level,(s.frames||0)+" frames"];
+      if(s.dropped) bits.push(s.dropped+" dropped");
+      stat.append(document.createTextNode(bits.join(" · ")));
+      n.append(stat);
+    }
+
+    // Honest boundary: SDI is one-way, so a green lamp cannot mean the ATEM got it.
+    const note=el("p",{class:"hint",style:"margin-top:8px"});
+    note.append(document.createTextNode(
+      "Green means this card is sending a valid fill + key pair. SDI is one-way, so the app can't "+
+      "confirm the cables reach the ATEM or that the keyer is set up — use Send test pattern and "+
+      "check the ATEM multiview."));
+    n.append(note);
   }
 
   /* ---- presets + folders ---- */

@@ -2,7 +2,7 @@
 
 All suites run under **jsdom** (no browser) and load `lt.html` from
 `../lt.html`. `npm test` runs `test/run-all.js`, which first syntax-checks the
-single-file app, then runs all 15 suites and aggregates pass/fail.
+single-file app, then runs all 16 suites and aggregates pass/fail.
 
 ## Conventions that matter (jsdom quirks)
 
@@ -48,6 +48,7 @@ single-file app, then runs all 15 suites and aggregates pass/fail.
 | `clear_rule_test` | the configurable Clear Behavior rules (`pres` / `all` / layer-based) |
 | `manual_source_test` | Scripture/Reference in **Manual** source render `d.content`; live elements never fall back to it (placeholder-leak guard) |
 | `source_fallback_test` | the same source rules across **both** render paths (static *and* ticker), plus the Name/Text live-placeholder guard and the standing-role-label rule |
+| `sdi_test` | DeckLink fill+key: `sdi.js` pure logic, the status lamp naming each fault, and the guard that SDI settings never enter the config |
 
 ## The source-fallback rule (read before touching `setText` / `marqText`)
 

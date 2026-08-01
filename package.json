@@ -25,6 +25,7 @@
       "main.js",
       "preload.js",
       "relay.js",
+      "sdi.js",
       "lt.html",
       "build/icon.*",
       "!test/**",
