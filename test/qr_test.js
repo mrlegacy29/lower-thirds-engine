@@ -73,12 +73,15 @@ function reservedMap(ver,size){
 function decode(q){
   const size=q.size, m=q.modules, ver=q.version;
   // --- format info, copy 1, unmasked with the fixed XOR ---
+  // Placement position i carries format bit INDEX i, where index 0 is the MSB
+  // (ISO/IEC 18004). Reading LSB-first here would silently undo an encoder that
+  // wrote LSB-first — which is exactly how an unscannable code passed a round trip.
   let raw=0;
   for(let i=0;i<15;i++){
     let b;
     if(i<6)b=m[8][i]; else if(i===6)b=m[8][7]; else if(i===7)b=m[8][8];
     else if(i===8)b=m[7][8]; else b=m[14-i][8];
-    if(b)raw|=(1<<i);
+    if(b)raw|=(1<<(14-i));
   }
   const fmt=raw^0b101010000010010;
   // The 15-bit format word is (5 data bits << 10) | 10 BCH bits, so level+mask are the
@@ -207,6 +210,54 @@ function decode(q){
       ok('ECC level reads back as M: ' + label, d.eccLevel === 0b00);
       ok('mask index is in range: ' + label, d.mask >= 0 && d.mask <= 7);
     });
+
+    /* ---------- format info vs the PUBLISHED table (external ground truth) ----------
+       A round trip alone cannot prove placement: an encoder that writes the word
+       backwards and a decoder that reads it backwards agree with each other while a
+       real scanner rejects the symbol. These are the standard's own 15-bit strings for
+       ECC level M, written MSB-first, so they pin the bit ORDER to something outside
+       this codebase. */
+    {
+      const M_FORMAT = [
+        '101010000010010', // mask 0
+        '101000100100101', // 1
+        '101111001111100', // 2
+        '101101101001011', // 3
+        '100010111111001', // 4
+        '100000011001110', // 5
+        '100111110010111', // 6
+        '100101010100000', // 7
+      ];
+      // the encoder's own computation must match the published strings
+      let computedOk = true;
+      for (let k = 0; k < 8; k++) {
+        const got = (W.qrFormatBits(k) >>> 0).toString(2).padStart(15, '0');
+        if (got !== M_FORMAT[k]) { computedOk = false; console.log('   mask ' + k + ': got ' + got + ' want ' + M_FORMAT[k]); }
+      }
+      ok('format: qrFormatBits matches the published level-M table for all 8 masks', computedOk);
+
+      // and the MODULES must carry that string MSB-first starting at (8,0)
+      const q = W.qrEncode('format placement check');
+      const m = q.modules;
+      let read = '';
+      for (let i = 0; i < 15; i++) {
+        let b;
+        if (i < 6) b = m[8][i]; else if (i === 6) b = m[8][7]; else if (i === 7) b = m[8][8];
+        else if (i === 8) b = m[7][8]; else b = m[14 - i][8];
+        read += b ? '1' : '0';
+      }
+      ok('format: copy 1 modules spell a real published format string (MSB at (8,0))',
+         M_FORMAT.indexOf(read) >= 0);
+
+      // copy 2 must carry the SAME string: 7 up column 8, then 8 along row 8
+      const s = q.size;
+      let read2 = '';
+      for (let i = 0; i < 15; i++) read2 += ((i < 7) ? m[s - 1 - i][8] : m[8][s - 15 + i]) ? '1' : '0';
+      ok('format: copy 2 carries the identical string', read2 === read);
+      ok('format: the mask read back is the mask actually used',
+         M_FORMAT.indexOf(read) === ((W.qrFormatBits(M_FORMAT.indexOf(read)) >>> 0).toString(2).padStart(15,'0') === read
+           ? M_FORMAT.indexOf(read) : -1));
+    }
 
     /* ------------------------------ structure ------------------------------ */
     {

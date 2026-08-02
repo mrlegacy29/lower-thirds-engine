@@ -60,12 +60,14 @@ const put = (els) => { const c = W.defaultConfig(); c.elements = els; c._take = 
     const now = new Date(2026, 7, 1, 10, 30, 0);
     ok('secsUntilClock: 30 minutes out', W.secsUntilClock('11:00', now) === 1800);
     ok('secsUntilClock: accepts seconds', W.secsUntilClock('10:30:45', now) === 45);
-    // 10:30 today -> 09:00 tomorrow is 22h30m
-    ok('secsUntilClock: a time already past rolls to tomorrow',
-       W.secsUntilClock('09:00', now) === (22 * 3600 + 30 * 60));
-    // still-in-the-future-by-a-hair must NOT roll a whole day forward
-    ok('secsUntilClock: a few seconds ago does not roll forward',
+    // A passed time stays passed — it must NOT roll forward to tomorrow. Rolling made
+    // a countdown that had just hit zero flip to ~23:59, and brought a "hide at zero"
+    // element back on air counting down a whole day.
+    ok('secsUntilClock: a passed time goes negative, it does NOT roll to tomorrow',
+       W.secsUntilClock('09:00', now) === -(1 * 3600 + 30 * 60));
+    ok('secsUntilClock: just-passed is a small negative, not ~24h',
        W.secsUntilClock('10:29:30', now) === -30);
+    ok('secsUntilClock: rejects an out-of-range time', W.secsUntilClock('25:00', now) === null);
     ok('secsUntilClock: garbage returns null', W.secsUntilClock('not a time', now) === null);
   }
 

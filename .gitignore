@@ -17,3 +17,6 @@ Thumbs.db
 
 # electron-builder cache
 .cache/
+
+# scratch probes
+_probe_tmp.js

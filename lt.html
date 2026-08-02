@@ -435,7 +435,14 @@ const $=(id)=>document.getElementById(id);
 function clone(o){return JSON.parse(JSON.stringify(o));}
 function uid(){return 'e'+Math.random().toString(36).slice(2,9);}
 function deepMerge(base,over){const out=clone(base);for(const k in over){
-  if(over[k]&&typeof over[k]==='object'&&!Array.isArray(over[k])) out[k]=deepMerge(base[k]||{},over[k]);
+  // Only recurse when the BASE side is a plain object too. `base[k]||{}` used to hand a
+  // string to deepMerge, whose clone() returned a string, and assigning a property to it
+  // threw — so an object where a colour belongs (from an imported file or a broadcast
+  // config) took down the whole merge.
+  if(over[k]&&typeof over[k]==='object'&&!Array.isArray(over[k])){
+    const b=(base&&base[k]&&typeof base[k]==='object'&&!Array.isArray(base[k]))?base[k]:{};
+    out[k]=deepMerge(b,over[k]);
+  }
   // Arrays must be CLONED, not aliased. Assigning by reference made a loaded preset share
   // its elements array with live preview state, so every later edit silently rewrote the
   // saved preset (and a broadcast config could alias the relay's copy).
@@ -768,7 +775,10 @@ function qrVersionBits(v){
 function qrEncode(text){
   const bytes=[];
   // UTF-8; readers handle it in byte mode
-  const s=unescape(encodeURIComponent(String(text==null?"":text)));
+  // encodeURIComponent throws URIError on a lone surrogate (a half-pasted emoji), which
+  // aborted the whole render pass. Strip unpaired surrogates first.
+  const clean=String(text==null?"":text).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g,"").replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g,"$1");
+  let s; try{ s=unescape(encodeURIComponent(clean)); }catch(e){ return null; }
   for(let i=0;i<s.length;i++)bytes.push(s.charCodeAt(i)&0xFF);
 
   // smallest version that fits
@@ -873,7 +883,12 @@ function qrEncode(text){
     // format info for this mask
     const fb=qrFormatBits(k);
     for(let i=0;i<15;i++){
-      const b=((fb>>i)&1)===1;
+      // Placement position i carries format bit INDEX i, where index 0 is the MSB
+      // (ISO/IEC 18004). Writing the LSB at (8,0) instead reverses the whole word:
+      // a scanner reads it MSB-first, the BCH check fails, and the symbol is rejected
+      // — every code came out unscannable. A round trip cannot catch this on its own,
+      // because a decoder written the same way reverses it right back.
+      const b=((fb>>(14-i))&1)===1;
       // copy 1 (around the top-left finder)
       if(i<6)t[8][i]=b; else if(i===6)t[8][7]=b; else if(i===7)t[8][8]=b;
       else if(i===8)t[7][8]=b; else t[14-i][8]=b;
@@ -1020,13 +1035,18 @@ function fmtClock(d,fmt){
   return h+":"+pad2(m)+(fmt==="h:mm:ss"?":"+pad2(s):"")+" "+ap;
 }
 // "11:00" / "11:00:30" -> seconds remaining until that time TODAY (next day if past)
+// Seconds until the target time TODAY. Deliberately does NOT roll forward to
+// tomorrow once the time has passed: rolling meant a countdown that had just
+// reached zero flipped to ~23:59 and a "hide at zero" element came BACK on air
+// counting down a whole day. Passed is passed — the caller shows the zero text or
+// hides. (Rolling also can't be done correctly across a DST change.)
 function secsUntilClock(target,now){
   const mm=String(target||"").match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/); if(!mm)return null;
+  const h=Number(mm[1]), m=Number(mm[2]), s=Number(mm[3]||0);
+  if(h>23||m>59||s>59)return null;
   const t=new Date(now.getTime());
-  t.setHours(Number(mm[1]),Number(mm[2]),Number(mm[3]||0),0);
-  let diff=Math.round((t.getTime()-now.getTime())/1000);
-  if(diff<-60) diff+=86400;                     // rolled past midnight -> aim at tomorrow
-  return diff;
+  t.setHours(h,m,s,0);
+  return Math.round((t.getTime()-now.getTime())/1000);
 }
 // ProPresenter timer payloads vary by build; pull a seconds value out defensively.
 function ppTimerSeconds(t){
@@ -1089,7 +1109,29 @@ function sanitizeElement(raw){
   // dropped rather than merged into live state.
   const allowed=new Set(Object.keys(base).concat(["id","type"]));
   const filtered={};
-  Object.keys(raw).forEach(k=>{ if(allowed.has(k)) filtered[k]=raw[k]; });
+  // Allowlisting key NAMES is not enough — a file can carry the right key with the
+  // wrong TYPE (a number or object where a colour string belongs), which then reaches
+  // hexA()/typeCss and throws mid-render. Require the value to match the shape of the
+  // default it is replacing.
+  // Recursive: a wrong type NESTED inside (style.text.color as an object rather than a
+  // colour string) is just as damaging as one at the top, and reaches hexA()/typeCss.
+  const coerce=(v,tmpl)=>{
+    if(tmpl===undefined||tmpl===null)return undefined;          // nothing to match -> drop
+    if(Array.isArray(tmpl))return Array.isArray(v)?v:undefined;
+    if(typeof tmpl==="object"){
+      if(!v||typeof v!=="object"||Array.isArray(v))return undefined;
+      const o={}; let any=false;
+      Object.keys(v).forEach(k=>{ const c=coerce(v[k],tmpl[k]); if(c!==undefined){o[k]=c;any=true;} });
+      return any?o:undefined;
+    }
+    return (typeof v===typeof tmpl)?v:undefined;                // primitive must match
+  };
+  Object.keys(raw).forEach(k=>{
+    if(!allowed.has(k))return;
+    if(k==="id"||k==="type"){ filtered[k]=raw[k]; return; }
+    const c=coerce(raw[k],base[k]);
+    if(c!==undefined) filtered[k]=c;
+  });
   const e=deepMerge(base,filtered);
   e.type=raw.type; e.id=uid();                          // always re-id: incoming ids can collide
   return e;
@@ -1097,14 +1139,34 @@ function sanitizeElement(raw){
 // Re-issuing ids breaks cross-references, so remap them together and drop any that
 // dangle — a dangling visWith/dock.to hides an element forever with no way to fix
 // it from the inspector.
+// Returns the elements, and hangs the old->new id map off the array so callers can
+// remap anything ELSE that referenced those ids (rules[].target).
 function sanitizeElements(list){
-  const out=[],map={};
+  const out=[];
+  // Object.create(null): a plain {} would let an element whose id is "constructor" or
+  // "toString" resolve against Object.prototype and remap to garbage.
+  const map=Object.create(null);
   (Array.isArray(list)?list:[]).forEach(r=>{ const e=sanitizeElement(r); if(e){ if(r&&r.id)map[r.id]=e.id; out.push(e); } });
   out.forEach(e=>{
     if(e.visWith){ if(map[e.visWith])e.visWith=map[e.visWith]; else { delete e.visWith; if(e.vis==="linked")e.vis="normal"; } }
     if(e.dock&&e.dock.to){ if(map[e.dock.to])e.dock.to=map[e.dock.to]; else { e.dock.to=null; e.dock.on=false; } }
   });
+  out.idMap=map;
   return out;
+}
+// Rules point at element ids, and import re-issues every id — without this every
+// automation rule in an imported look silently aimed at an id that no longer exists,
+// and the panel's dropdown auto-selected the first element so it LOOKED wired up.
+function remapRules(rules,map){
+  if(!Array.isArray(rules))return [];
+  return rules.map(r=>{
+    if(!r||typeof r!=="object")return null;
+    const out=Object.assign({},r);
+    out.id=uid();
+    if(out.target&&map&&map[out.target])out.target=map[out.target];
+    else out.target=null;               // dangling -> panel shows "(pick an element)"
+    return out;
+  }).filter(Boolean);
 }
 function sanitizeLibrary(raw){
   const folders=[];
@@ -1114,7 +1176,9 @@ function sanitizeLibrary(raw){
     (Array.isArray(f.items)?f.items:[]).forEach(it=>{
       if(!it||typeof it!=="object"||!it.config)return;
       const cfg=deepMerge(defaultConfig(),it.config);
-      cfg.elements=sanitizeElements(it.config.elements);
+      const els=sanitizeElements(it.config.elements);
+      cfg.elements=els;
+      cfg.rules=remapRules(it.config.rules,els.idMap);    // rules must follow the new ids
       delete cfg.conn;                                   // never carry another machine's ProPresenter IP
       items.push({id:uid(),name:String(it.name||"Preset").slice(0,80),config:cfg});
     });
@@ -1137,7 +1201,9 @@ function parseGfx(text){
   if(p.kind==="look"||(!p.kind&&p.config&&p.config.elements)){
     const src=p.config||{};
     const cfg=deepMerge(defaultConfig(),src);
-    cfg.elements=sanitizeElements(src.elements);
+    const els=sanitizeElements(src.elements);
+    cfg.elements=els;
+    cfg.rules=remapRules(src.rules,els.idMap);        // rules must follow the new ids
     delete cfg.conn;
     if(!cfg.elements.length) return {ok:false,error:"That look file has no usable elements."};
     return {ok:true,kind:"look",payload:{name:String(p.name||"Imported look").slice(0,80),config:cfg}};
@@ -1327,8 +1393,21 @@ function createBus(){
     publish(cfg){
       lsSet(LS_PROGRAM,cfg);
       if(bc)bc.postMessage({type:"program",cfg});
+      // A resolved fetch is NOT a successful Take. The relay answers 400 on bad JSON,
+      // 413 when the config is over the cap and 403 on a refused origin — all of which
+      // resolve, so the operator was told "on air" when nothing had been sent.
       fetch(relayBase()+"/config",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify(cfg)}).then(()=>{relayOk=true;statusCb&&statusCb(true);}).catch(()=>{});
+        body:JSON.stringify(cfg)})
+        .then((r)=>{
+          if(r&&r.ok){ relayOk=true; statusCb&&statusCb(true); return; }
+          relayOk=false;
+          const code=(r&&r.status)||0;
+          statusCb&&statusCb(false,code===413
+            ?"Take failed: the look is too large to send (over 5 MB). Shrink or unlink an imported image."
+            :("Take failed: the local server answered "+code+"."));
+        })
+        .catch((e)=>{ relayOk=false;
+          statusCb&&statusCb(false,"Take failed: the local server is not reachable. Is the app still running?"); });
     },
     isRelay(){return relayOk;}
   };
@@ -1637,7 +1716,9 @@ function makeElRenderer(){
   function titleFor(d,data,nv){
     const live=(data&&data.title)||"";
     if(live) return live;
-    return nv?((d.content&&d.content.title)||""):"";
+    // through subVars so the standing role label can carry a {{placeholder}}, matching
+    // nameFor() which already goes through manualContent()
+    return nv?(subVars(d.content||{}).title||""):"";
   }
 
   function buildContent(d){
@@ -1659,7 +1740,9 @@ function makeElRenderer(){
   }
 
   // text used by the ticker / credits-roll for each type
-  function marqText(d,data){ const t=d.type, c=d.content||{};
+  // subVars fills {{placeholders}} from bound live data. Read content THROUGH this, never
+  // straight off d.content, or a bound value renders as literal braces on air.
+  function marqText(d,data){ const t=d.type, c=subVars(d.content||{});
     if(t==="text"){ const mc=manualContent(d); return [(data&&data.text)||(mc&&mc.text)||""]; }
     // Same manual-source rule as setText(): a ticker/roll element is rendered HERE instead,
     // so it needs the identical d.content fallback -- without it a manual Scripture/Reference
@@ -1689,8 +1772,16 @@ function makeElRenderer(){
     // air on its own — an empty ref list on a ticker scrolled bare diamonds. Clear out
     // and leave the element blank instead.
     if(!parts0.length){
-      content.querySelectorAll(".node").forEach(n=>n.remove());
-      marqTrack=null; marqSig=""; marqOn=false;
+      // Rebuild the normal nodes rather than leaving the element empty. setText only
+      // calls buildContent() when it sees marqOn true, so clearing marqOn here without
+      // restoring the nodes meant the next non-ticker render hit a null querySelector
+      // and threw, taking the whole render pass down.
+      if(marqOn||content.querySelector(".lt-marq")||!content.querySelector(".node")){
+        content.querySelectorAll(".node").forEach(n=>n.remove());
+        marqTrack=null; marqSig="";
+        buildContent(d);
+      }
+      marqOn=false;
       return;
     }
     const sig=(vertical?"v|":"h|")+JSON.stringify(sty)+"|"+parts0.join("\u0001");
@@ -1731,9 +1822,12 @@ function makeElRenderer(){
       else ref.textContent=rtext;
       ref.style.display=rtext?"block":"none"; typeCss(ref,st.ref);
     } else if(t==="sermonTitle"){
+      // Read through manualContent so {{placeholders}} are filled from bound data —
+      // reading d.content directly put the literal braces on air.
       const ti=content.querySelector(".s-title"), su=content.querySelector(".s-sub");
-      ti.textContent=d.content.title||""; ti.style.display=d.content.title?"block":"none"; typeCss(ti,st.title);
-      su.textContent=d.content.sub||""; su.style.display=d.content.sub?"block":"none"; typeCss(su,st.sub);
+      const mc=manualContent(d)||subVars(d.content||{});
+      ti.textContent=mc.title||""; ti.style.display=mc.title?"block":"none"; typeCss(ti,st.title);
+      su.textContent=mc.sub||""; su.style.display=mc.sub?"block":"none"; typeCss(su,st.sub);
     } else if(t==="name"){
       const nm=content.querySelector(".n-name"), ti=content.querySelector(".n-title");
       const nv=nameFor(d,data), tv=titleFor(d,data,nv);
@@ -1745,10 +1839,11 @@ function makeElRenderer(){
       tx.textContent=v; typeCss(tx,st.text);
     } else if(t==="bulletList"){
       const hd=content.querySelector(".b-head"), ul=content.querySelector(".b-list");
-      hd.textContent=d.content.heading||""; hd.style.display=(d.showHeading!==false&&d.content.heading)?"block":"none";
+      const mc=manualContent(d)||subVars(d.content||{});   // fill {{placeholders}}
+      hd.textContent=mc.heading||""; hd.style.display=(d.showHeading!==false&&mc.heading)?"block":"none";
       hd.style.marginBottom=".4em"; typeCss(hd,st.heading);
-      ul.innerHTML=""; const mk=d.content.marker||"\u2022";
-      (d.content.bullets||"").split("\n").map(s=>s.trim()).filter(Boolean).forEach(line=>{
+      ul.innerHTML=""; const mk=mc.marker||"\u2022";
+      (mc.bullets||"").split("\n").map(s=>s.trim()).filter(Boolean).forEach(line=>{
         const li=el("li",null,[el("span",{class:"mk",text:mk}),el("span",{text:line})]);
         ul.append(li); });
       typeCss(ul,st.item);
@@ -1764,7 +1859,7 @@ function makeElRenderer(){
       renderHistChips(d,items);
     } else if(t==="qr"){
       const img=content.querySelector(".q-img"), lab=content.querySelector(".q-label");
-      const c=d.content||{};
+      const c=subVars(d.content||{});    // caption may carry a {{placeholder}} too
       const payload=applyVars((data&&data.qrText!=null)?data.qrText:(c.text||""),CUR_VARS);
       const sig=payload+"|"+c.fg+"|"+c.bg+"|"+c.quiet+"|"+(c.plate!==false);
       // Encoding is not free, so only rebuild when the payload or colours actually
@@ -1986,7 +2081,7 @@ function createStage(scaler,opts){
       // If the blank plate ever matters, style the BACKGROUND off, don't hide here.
       return {items,headerHold};
     }
-    if(d.type==="eventList"){ const lines=(d.content.items||"").split("\n").map(s=>s.trim()).filter(Boolean);
+    if(d.type==="eventList"){ const lines=String(subVars(d.content||{}).items||"").split("\n").map(s=>s.trim()).filter(Boolean);
       return {items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
     if(d.type==="qr"){
       const c=d.content||{}, payload=String(c.text||"");
@@ -1996,7 +2091,9 @@ function createStage(scaler,opts){
       return {qrText:payload};
     }
     if(d.type==="clock"){
-      const c=d.content||{}, now=new Date(), fmt=c.fmt||"h:mm";
+      // subVars so a clock label can carry a bound {{placeholder}} like every other
+      // operator-typed field.
+      const c=subVars(d.content||{}), now=new Date(), fmt=c.fmt||"h:mm";
       let text="", label=c.label||"";
       if(c.mode==="countdown"||c.mode==="pptimer"){
         let secs=null;
@@ -2082,7 +2179,13 @@ function createStage(scaler,opts){
   }
 
   function setConfig(next){
-    cfg=next; const ids=new Set();
+    cfg=next;
+    // Recompute automation from the slide that is ALREADY live. ruleState was only
+    // rebuilt in setLive(), so disabling or deleting a rule and pressing TAKE left its
+    // target pinned on air until ProPresenter happened to change slide — and on a held
+    // slide (a sermon point, a looping announcement) that is indefinitely.
+    ruleState=evalRules(cfg&&cfg.rules, live?{text:live.rawText||live.body||"",ref:live.ref||"",cleared:false}:{cleared:true});
+    const ids=new Set();
     (cfg.elements||[]).forEach(d=>{
       if(!d)return;
       ids.add(d.id); let r=renderers.get(d.id);
@@ -2280,11 +2383,22 @@ if(!isOutput){
   // OBS output shows the right look right away (before any Take)
   setTimeout(()=>bus.publish(program),250);
 
-  function savePreview(){ lsSet(LS_PREVIEW,preview); }
+  // Persisting Preview is exactly when Preview may have diverged from Program, so the
+  // TAKE indicator has to refresh here too. Several paths call savePreview() WITHOUT
+  // applyPreview() — dragging on the stage, resizing, the connection fields, the SDI and
+  // Live-data panels — and those all left the button reading "ON AIR" while the preview
+  // had unsent changes.
+  function savePreview(){ lsSet(LS_PREVIEW,preview); if(typeof updateTakeState==="function")updateTakeState(); }
   function applyPreview(){ applyBg(pvMon,preview.out.bg); $("pvSafe").style.display=preview.out.safe?"block":"none";
     pvStage.setConfig(preview); savePreview(); if(typeof updateTakeState==="function")updateTakeState();
     // adding/removing a PP-timer clock decides whether the poller fetches timers
-    if(typeof refreshWantTimers==="function")refreshWantTimers(); }
+    if(typeof refreshWantTimers==="function")refreshWantTimers();
+    // Re-arm the live-data feed here too. It used to be started ONLY from the Live-data
+    // panel's edit handlers, so on a fresh launch (or after Revert / loading a preset /
+    // importing a look) the console never fetched anything and both monitors showed raw
+    // {{placeholders}} while the OBS output — which starts its own feed — showed the
+    // real values. The operator was looking at a Preview that did not match air.
+    if(typeof refreshDataFeed==="function")refreshDataFeed(); }
 
   /* ---- preview live/sample feed ---- */
   let liveMode=false;
@@ -3464,8 +3578,13 @@ if(!isOutput){
           selectedId=preview.elements[0]?preview.elements[0].id:null;
           savePreview(); applyPreview(); renderPanels();
         } else if(r.kind==="library"){
-          const merge=confirm("Import "+r.payload.length+" folder(s).\n\nOK = ADD to your presets.\nCancel = REPLACE everything.");
-          presets.folders=merge?presets.folders.concat(r.payload):r.payload;
+          // Cancel/Escape must NOT be the destructive branch. It was wired as
+          // "Cancel = REPLACE everything", so dismissing the dialog wiped the entire
+          // preset library. Ask for the destructive option explicitly instead.
+          const replace=confirm("Import "+r.payload.length+" folder(s).\n\n"+
+            "OK = REPLACE your whole preset library.\nCancel = ADD these folders to it.");
+          if(replace && !confirm("Really replace ALL "+presets.folders.length+" existing folder(s)?\n\nThis cannot be undone."))return;
+          presets.folders=replace?r.payload:presets.folders.concat(r.payload);
           savePresets(presets); renderPanels();
         }
       };

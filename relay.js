@@ -60,6 +60,18 @@ function createServer(htmlFile) {
   const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
   function originOf(req) { return (req && req.headers && req.headers.origin) || ""; }
   function originAllowed(req) { const o = originOf(req); return !o || LOCAL_ORIGIN.test(o); }
+  // A no-Origin allowance is right for curl/OBS/tests, but a browser also omits Origin
+  // on a plain no-cors GET — so a remote page could still drive /pp and /fetch (it
+  // cannot READ the reply, but it can make the stream PC issue the request, which is
+  // the SSRF that matters). Sec-Fetch-Site is sent by every current browser and is
+  // forbidden to script, so it distinguishes "a browser, cross-site" from "not a
+  // browser" without breaking the legitimate no-Origin callers.
+  function proxyAllowed(req) {
+    if (!originAllowed(req)) return false;
+    const site = (req && req.headers && req.headers["sec-fetch-site"]) || "";
+    if (site && site !== "same-origin" && site !== "same-site" && site !== "none") return false;
+    return true;
+  }
   function cors(res, req) {
     const o = originOf(req);
     // Echo the origin only when it is local; otherwise send no ACAO at all so a
@@ -132,16 +144,23 @@ function createServer(htmlFile) {
       // across a 64KB socket boundary became U+FFFD and went to air corrupted.
       const chunks = []; let len = 0; let tooBig = false;
       req.on("data", (c) => {
+        if (tooBig) return;
         len += c.length;
-        if (len > 5e6) { tooBig = true; req.destroy(); return; }
+        if (len > 5e6) {
+          // Do NOT req.destroy() here: killing the socket means the 413 never reaches
+          // the console, so an over-size Take failed silently and the operator was told
+          // it was on air. Stop buffering, answer honestly, then close.
+          tooBig = true; chunks.length = 0;
+          cors(res, req);
+          res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" });
+          res.end(JSON.stringify({ ok: false, error: "config too large", limit: 5e6 }));
+          return;
+        }
         chunks.push(c);
       });
       req.on("aborted", () => { /* client gave up; nothing to answer */ });
       req.on("end", () => {
-        if (tooBig) {
-          cors(res, req); res.writeHead(413, { "Content-Type": "application/json" });
-          return res.end(JSON.stringify({ error: "config too large", limit: 5e6 }));
-        }
+        if (tooBig) return;                 // already answered with 413 above
         let ok = true, detail = null;
         try { programConfig = JSON.parse(Buffer.concat(chunks).toString("utf8")); broadcast(programConfig); }
         catch (e) { ok = false; detail = String((e && e.message) || e); }
@@ -188,16 +207,12 @@ function createServer(htmlFile) {
     // not be usable by a remote page. https is allowed here (unlike /pp, which talks
     // to ProPresenter on the LAN over http).
     if (p === "/fetch" && req.method === "GET") {
-      if (!originAllowed(req)) return deny(res, "cross-origin use of the data proxy");
+      if (!proxyAllowed(req)) return deny(res, "cross-origin use of the data proxy");
       const target = u.query.target;
       if (!target) { res.writeHead(400); return res.end("missing target"); }
       let t;
       try { t = new url.URL(target); } catch (e) { res.writeHead(400); return res.end("bad target"); }
       if (t.protocol !== "http:" && t.protocol !== "https:") { res.writeHead(400); return res.end("http(s) only"); }
-      const mod = t.protocol === "https:" ? require("https") : http;
-      const opts = { hostname: t.hostname, port: t.port || (t.protocol === "https:" ? 443 : 80),
-                     path: t.pathname + t.search, method: "GET", timeout: 8000,
-                     headers: { "User-Agent": "LowerThirdsEngine", "Accept": "*/*" } };
       let done = false;
       const fail = (why) => {
         if (done) return; done = true;
@@ -205,31 +220,54 @@ function createServer(htmlFile) {
         try { cors(res, req); res.writeHead(502, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: "fetch failed", detail: String(why || "") })); } catch (e) {}
       };
-      const freq = mod.request(opts, (pres) => {
-        // Cap the body: a bound source that turns into a huge download must not be able
-        // to exhaust memory mid-service.
-        let len = 0; const chunks = [];
-        pres.on("data", (c) => { len += c.length; if (len > 2e6) { pres.destroy(); return fail("response too large"); } chunks.push(c); });
-        pres.on("end", () => {
-          if (done) return; done = true;
-          cors(res, req);
-          // Always text/plain + nosniff: the body is untrusted third-party content and
-          // must never be able to execute on the relay's own origin.
-          res.writeHead(pres.statusCode || 502, { "Content-Type": "text/plain; charset=utf-8", "X-Content-Type-Options": "nosniff" });
-          res.end(Buffer.concat(chunks).toString("utf8"));
+      // Follow redirects. Google answers a published-Sheet CSV URL — the documented
+      // primary source — with a 307 to googleusercontent.com. Passing that straight
+      // through dropped the Location header (every header is replaced below) and
+      // returned an empty body, so the source could NEVER load. Bounded hops, and the
+      // scheme is re-validated each time so a redirect cannot walk us to file: or
+      // some other protocol.
+      const hop = (u, left) => {
+        if (done) return;
+        if (left < 0) return fail("too many redirects");
+        const mod = u.protocol === "https:" ? require("https") : http;
+        const opts = { hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80),
+                       path: u.pathname + u.search, method: "GET", timeout: 8000,
+                       headers: { "User-Agent": "LowerThirdsEngine", "Accept": "*/*" } };
+        const freq = mod.request(opts, (pres) => {
+          const code = pres.statusCode || 0;
+          if (code >= 300 && code < 400 && pres.headers.location) {
+            pres.resume();                                  // drain, we only want the header
+            let next;
+            try { next = new url.URL(pres.headers.location, u); } catch (e) { return fail("bad redirect target"); }
+            if (next.protocol !== "http:" && next.protocol !== "https:") return fail("redirect to a non-http(s) scheme");
+            return hop(next, left - 1);
+          }
+          // Cap the body: a bound source that turns into a huge download must not be
+          // able to exhaust memory mid-service. The cap applies to every hop.
+          let len = 0; const chunks = [];
+          pres.on("data", (c) => { len += c.length; if (len > 2e6) { pres.destroy(); return fail("response too large"); } chunks.push(c); });
+          pres.on("end", () => {
+            if (done) return; done = true;
+            cors(res, req);
+            // Always text/plain + nosniff: the body is untrusted third-party content and
+            // must never be able to execute on the relay's own origin.
+            res.writeHead(code || 502, { "Content-Type": "text/plain; charset=utf-8", "X-Content-Type-Options": "nosniff" });
+            res.end(Buffer.concat(chunks).toString("utf8"));
+          });
+          pres.on("error", (e) => fail(e && e.message));
         });
-        pres.on("error", (e) => fail(e && e.message));
-      });
-      freq.on("timeout", () => { freq.destroy(); fail("timeout"); });
-      freq.on("error", (e) => fail(e && e.message));
-      freq.end();
+        freq.on("timeout", () => { freq.destroy(); fail("timeout"); });
+        freq.on("error", (e) => fail(e && e.message));
+        freq.end();
+      };
+      hop(t, 5);
       return;
     }
     if (p === "/pp" && req.method === "GET") {
       // The proxy can reach any http host the stream PC can. With a wildcard CORS
       // header a remote page could use it to read church-LAN devices, so it is
       // restricted to local callers like /config.
-      if (!originAllowed(req)) return deny(res, "cross-origin use of the ProPresenter proxy");
+      if (!proxyAllowed(req)) return deny(res, "cross-origin use of the ProPresenter proxy");
       if (!u.query.target) { res.writeHead(400); return res.end("missing target"); }
       return proxyPP(u.query.target, res, req);
     }

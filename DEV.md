@@ -2,7 +2,7 @@
 
 All suites run under **jsdom** (no browser) and load `lt.html` from
 `../lt.html`. `npm test` runs `test/run-all.js`, which first syntax-checks the
-single-file app, then runs all 22 suites and aggregates pass/fail.
+single-file app, then runs all 23 suites and aggregates pass/fail.
 
 ## Conventions that matter (jsdom quirks)
 
@@ -55,6 +55,7 @@ single-file app, then runs all 22 suites and aggregates pass/fail.
 | `theme_rules_test` | brand tokens resolve at render (and literals stay literal — a theme-only change restyles the element), plus the rules engine: full control, release-on-clear, invalid regex, ref-vs-text |
 | `qr_test` | the QR encoder: RS cross-checked against an independent implementation, published degree-10 generator, zero syndromes, and round trips through a decoder written from the READ side of the spec |
 | `databind_test` | {{placeholder}} substitution (unknown names stay verbatim, never blank), CSV/JSON parsing incl. the ambiguous 2-column case, and the relay's /fetch origin gate + content-type pinning |
+| `audit_fixes_test` | second-audit regressions: countdown no longer rolls a passed target to ~24h, imported rules are remapped to the new element ids, wrong-typed imported values are rejected, {{placeholders}} resolve in ALL nine element types via the real feed, QR survives a lone surrogate, leaving an empty ticker doesn't throw |
 
 ## The source-fallback rule (read before touching `setText` / `marqText`)
 

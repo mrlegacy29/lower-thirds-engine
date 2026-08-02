@@ -254,4 +254,21 @@ app.on("before-quit", () => {
   try { if (relayServer) relayServer.close(); } catch (e) {} relayServer = null;
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+
+// The SDI renderer is an OFFSCREEN BrowserWindow, so it counts as an open window and
+// 'window-all-closed' never fires while SDI is running: closing the console left an
+// invisible process still holding the DeckLink and port 7777, and the next launch
+// failed to bind. Quit when the last VISIBLE window goes, releasing the card first.
+function visibleWindowCount() {
+  return BrowserWindow.getAllWindows().filter((w) => {
+    try { return !w.isDestroyed() && !w.webContents.isOffscreen(); } catch (e) { return true; }
+  }).length;
+}
+app.on("browser-window-closed", () => {
+  if (process.platform === "darwin") return;
+  // defer: the window is still in getAllWindows() during this event
+  setImmediate(() => {
+    if (visibleWindowCount() === 0) { try { if (sdi) sdi.stop(); } catch (e) {} app.quit(); }
+  });
+});
+app.on("activate", () => { if (visibleWindowCount() === 0) createWindow(); });

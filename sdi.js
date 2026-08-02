@@ -161,11 +161,13 @@ function startRenderer(url, mode) {
 /* --------------------------------------------------------------- frame pump
    displayFrame() resolves when the card has taken the frame, so awaiting it in a
    loop paces us to the SDI clock automatically — no timers, no drift. */
+let pumpGen = 0;
 async function pump() {
   if (pumping) return;
   pumping = true;
+  const myGen = pumpGen;
   const blank = Buffer.alloc(state._bytes, 0);   // fully transparent until the page paints
-  while (running && playback) {
+  while (running && playback && myGen === pumpGen) {
     try {
       const frame = latest || blank;
       await playback.displayFrame(frame);
@@ -187,10 +189,18 @@ async function pump() {
 }
 
 /* -------------------------------------------------------------- start / stop */
+let starting = false;
 async function start(opts) {
   opts = opts || {};
   if (!macadam) { const a = available(); state.error = a.reason; notify(); throw new Error(a.reason); }
   if (!BrowserWindow) { state.error = "SDI output needs the desktop app (no renderer available)."; notify(); throw new Error(state.error); }
+  // Re-entrancy guard. start() awaits, so a second click (or an IPC retry) could run
+  // the whole body concurrently: `if (running) await stop()` never saw running=true
+  // because the first call had not set it yet, and the second opened another offscreen
+  // window and another device handle, orphaning the first.
+  if (starting) throw new Error("SDI output is already starting.");
+  starting = true;
+  try {
   if (running) await stop();
 
   const mode = modeById(opts.mode);
@@ -231,21 +241,30 @@ async function start(opts) {
   }
 
   running = true; state.on = true;
+  state.error = null;         // a clean start clears any error left by a previous run
+  lastFrameAt = Date.now();   // so health() doesn't read "no frame in Infinity s" before the first one lands
   try { state.reference = playback.referenceStatus ? playback.referenceStatus() : null; } catch (e) {}
   notify();
   pump();                     // fire-and-forget; the loop owns its own errors
   return status();
+  } finally { starting = false; }
 }
 
 async function teardown() {
   running = false;
+  pumpGen++;                     // any in-flight pump belongs to an older generation now
   try { if (playback && playback.stop) playback.stop(); } catch (e) {}
   playback = null;
   try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) {}
   win = null;
   latest = null;
-  // let an in-flight displayFrame settle before the caller reopens the device
+  // Let an in-flight displayFrame settle before the caller reopens the device, but do
+  // not trust it to finish: a wedged driver call could hang forever. After the wait we
+  // clear `pumping` ourselves — leaving it set made the NEXT start() skip launching a
+  // pump (pump() returns early when pumping is true), so the card opened and sent
+  // nothing at all while the lamp read green.
   for (let i = 0; i < 40 && pumping; i++) await new Promise((r) => setTimeout(r, 25));
+  pumping = false;
 }
 
 async function stop() {
