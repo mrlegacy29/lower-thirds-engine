@@ -196,7 +196,13 @@ function createServer(htmlFile) {
       if (programConfig) res.write("data: " + JSON.stringify({ type: "program", cfg: programConfig }) + "\n\n");
       // Default to "output": an OBS Browser Source added before this change (or any
       // third-party consumer) has no role param, and it IS an output.
-      res._role = (u.query.role === "console") ? "console" : "output";
+      // The role is a self-declared hint used only for the console's "is OBS attached?"
+      // lamp — never for access control. A cross-site subscriber is not counted at all,
+      // so a stray page cannot make the lamp read green when no output is connected.
+      // (SSE is same-origin-readable only, so this is about accuracy, not secrecy.)
+      const sfs = (req.headers && req.headers["sec-fetch-site"]) || "";
+      const foreign = sfs && sfs !== "same-origin" && sfs !== "same-site" && sfs !== "none";
+      res._role = foreign ? "foreign" : ((u.query.role === "console") ? "console" : "output");
       sseClients.add(res);
       const ka = setInterval(() => { try { res.write(": ping\n\n"); } catch (e) {} }, 25000);
       req.on("close", () => { clearInterval(ka); sseClients.delete(res); });

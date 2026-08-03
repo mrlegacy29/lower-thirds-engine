@@ -614,8 +614,10 @@ function defaultTheme(){
     ink:"#ffffff",        // primary text
     muted:"#c9d4e6",      // secondary text
     panel:"#0b1220",      // chip / panel fills
-    display:"'Oswald',sans-serif",
-    body:"Georgia,serif"
+    // These MUST be byte-identical to entries in THEME_FONTS, or the Brand-theme
+    // dropdowns cannot match them and display the wrong font on a fresh config.
+    display:"'Oswald','Arial Narrow',sans-serif",
+    body:"Georgia,'Times New Roman',serif"
   };
 }
 function resolveTok(v,theme){
@@ -645,7 +647,10 @@ function tok(v){ return resolveTok(v,CUR_THEME); }
 function applyVars(s,vars){
   if(typeof s!=="string"||s.indexOf("{{")<0)return s;
   return s.replace(/\{\{\s*([\w.\- ]+?)\s*\}\}/g,(m,k)=>{
-    const v=vars?vars[k]:undefined;
+    // hasOwnProperty, not a plain lookup: {{constructor}} or {{toString}} would
+    // otherwise resolve against Object.prototype and paint "function Object() {...}"
+    // on air instead of staying verbatim.
+    const v=(vars&&Object.prototype.hasOwnProperty.call(vars,k))?vars[k]:undefined;
     return (v==null||v==="")?m:String(v);
   });
 }
@@ -679,7 +684,20 @@ function parseDataSource(kind,body,pick,layout){
       // No heuristic can tell those apart, so `layout` is an explicit operator choice.
       // The default only guesses where it is safe: exactly two columns is
       // overwhelmingly a name/value sheet, wider is a table.
-      const rows=txt.replace(/\r/g,"").split("\n").map(l=>l.trim()).filter(Boolean).map(l=>splitCsv(l));
+      // Split on newlines that are NOT inside quotes — a quoted cell may legitimately
+      // contain a line break (Google Sheets exports them that way), and splitting
+      // blindly truncated the value and turned the remainder into a junk placeholder.
+      // Also strips a UTF-8 BOM, which would otherwise become part of the first name.
+      const clean=txt.replace(/^﻿/,"").replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+      const lines=[]; let cur="",inQ=false;
+      for(let i=0;i<clean.length;i++){
+        const ch=clean[i];
+        if(ch==='"'){ if(inQ&&clean[i+1]==='"'){cur+='""';i++;} else {inQ=!inQ;cur+=ch;} }
+        else if(ch==="\n"&&!inQ){ lines.push(cur); cur=""; }
+        else cur+=ch;
+      }
+      lines.push(cur);
+      const rows=lines.map(l=>l.trim()).filter(Boolean).map(l=>splitCsv(l));
       if(!rows.length)return vars;
       const mode=layout||((rows[0].length===2)?"pairs":"table");
       if(mode==="pairs"){
@@ -1255,7 +1273,12 @@ function askText(label,def,okLabel){
     }
     okb.onclick=()=>finish(inp.value.trim()||null);
     cancel.onclick=()=>finish(null);
-    back.onclick=(e)=>{ if(e.target===back) finish(null); };   // click-away cancels
+    // Click-away cancels only if the press STARTED on the backdrop. Using click alone
+    // meant selecting text in the field and releasing outside discarded the name the
+    // operator was part-way through typing.
+    let downOnBack=false;
+    back.addEventListener("mousedown",(e)=>{ downOnBack=(e.target===back); });
+    back.onclick=(e)=>{ if(e.target===back && downOnBack) finish(null); };
     document.addEventListener("keydown",onKey,true);
     document.body.appendChild(back);
     setTimeout(()=>{ try{ inp.focus(); inp.select(); }catch(e){} },0);
@@ -1321,7 +1344,23 @@ function parseScripture(text){
 const LS_PROGRAM="pplt.program.v2", LS_PREVIEW="pplt.preview.v2", LS_PRESETS="pplt.presets.v2";
 const RELAY_PORT=7777;
 function lsGet(k,fb){try{const r=localStorage.getItem(k);return r?deepMerge(fb,JSON.parse(r)):clone(fb);}catch(e){return clone(fb);}}
-function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
+// A silent failure here is the worst kind: the operator keeps designing, nothing is
+// ever persisted, and the work is gone on reload. Surface it once (not per keystroke).
+let _lsWarned=false;
+function lsSet(k,v){
+  try{ localStorage.setItem(k,JSON.stringify(v)); _lsWarned=false; }
+  catch(e){
+    if(!_lsWarned){
+      _lsWarned=true;
+      try{ console.error("lower-thirds: could not save — local storage is full",e); }catch(e2){}
+      try{ if(typeof alert==="function") alert(
+        "Couldn't save your work — this browser's local storage is full.\n\n"+
+        "The most common cause is an imported image or video embedded in the look. "+
+        "Remove it, or host it and paste the URL instead.\n\n"+
+        "Until then, changes will NOT survive a reload."); }catch(e2){}
+    }
+  }
+}
 function loadPresets(){try{const r=localStorage.getItem(LS_PRESETS);if(r)return JSON.parse(r);}catch(e){}
   return {folders:[{id:uid(),name:"My Presets",items:[]}]};}
 function savePresets(p){lsSet(LS_PRESETS,p);}
@@ -1335,41 +1374,61 @@ function relayBase(){ return SERVED? location.origin : ("http://localhost:"+RELA
    last good values (a blip must not blank a graphic), and everything is torn down
    on setSources so a config change can't leak timers. */
 function createDataFeed(onVars){
-  let srcs=[],vals={},timers=[],gen=0;
+  let srcs=[],timers=[],gen=0,debounce=null;
+  // Values are kept PER SOURCE and recombined, so disabling or deleting a source
+  // actually drops its values. A single flat map meant a removed source's values
+  // stayed bound and kept rendering on air.
+  let bySrc=Object.create(null);
   const status={};
-  function fetchOne(s){
+  function combine(){
+    const out=Object.create(null);
+    srcs.forEach(s=>{ const v=bySrc[s.id]; if(!v)return;
+      Object.keys(v).forEach(k=>{ out[k]=v[k]; if(s.name)out[s.name+"."+k]=v[k]; }); });
+    return out;
+  }
+  const emit=()=>{ try{ onVars&&onVars(combine(),status); }catch(e){} };
+  function fetchOne(s,my){
     if(!s||!s.url||s.enabled===false)return Promise.resolve();
     const u=relayBase()+"/fetch?target="+encodeURIComponent(s.url);
     return fetch(u,{cache:"no-store"})
       .then(r=>r.ok?r.text():Promise.reject(new Error("HTTP "+r.status)))
       .then(t=>{
+        // An in-flight fetch from a previous source list must not resurrect values
+        // after the operator deleted or edited the source.
+        if(my!==gen)return;
         const got=parseDataSource(s.kind||"csv",t,s.pick,s.layout);
         const n=Object.keys(got).length;
-        if(!n){ status[s.id]={ok:false,msg:"fetched, but no values found"}; return; }
-        Object.keys(got).forEach(k=>{
-          vals[k]=got[k];
-          if(s.name)vals[s.name+"."+k]=got[k];      // also namespaced, for collisions
-        });
+        if(!n){ status[s.id]={ok:false,msg:"fetched, but no values found"}; emit(); return; }
+        bySrc[s.id]=got;
         status[s.id]={ok:true,msg:n+" value"+(n===1?"":"s")};
-        try{ onVars&&onVars(Object.assign({},vals),status); }catch(e){}
+        emit();
       })
-      .catch(e=>{ status[s.id]={ok:false,msg:String((e&&e.message)||e)};
-        try{ onVars&&onVars(Object.assign({},vals),status); }catch(e2){} });
+      .catch(e=>{ if(my!==gen)return;
+        // keep the last good values for THIS source — a blip must not blank a graphic
+        status[s.id]={ok:false,msg:String((e&&e.message)||e)}; emit(); });
   }
-  function stop(){ timers.forEach(t=>clearInterval(t)); timers=[]; gen++; }
+  function stop(){ timers.forEach(t=>clearInterval(t)); timers=[]; if(debounce){clearTimeout(debounce);debounce=null;} gen++; }
   function setSources(list){
     stop();
-    srcs=(Array.isArray(list)?list:[]).filter(s=>s&&s.url);
+    const next=(Array.isArray(list)?list:[]).filter(s=>s&&s.url);
+    // drop values for sources that are gone or now disabled
+    const live=new Set(next.filter(s=>s.enabled!==false).map(s=>s.id));
+    Object.keys(bySrc).forEach(id=>{ if(!live.has(id))delete bySrc[id]; });
+    Object.keys(status).forEach(id=>{ if(!live.has(id))delete status[id]; });
+    srcs=next;
     const my=gen;
+    // Debounce the first fetch: setSources runs on every keystroke and every slider
+    // step while editing a source, and firing immediately each time hammered the
+    // endpoint straight past the 5s floor.
+    debounce=setTimeout(()=>{ if(my!==gen)return; srcs.forEach(s=>fetchOne(s,my)); },400);
     srcs.forEach(s=>{
-      fetchOne(s);
       const ms=Math.max(5,Number(s.interval)||60)*1000;   // never hammer: 5s floor
-      timers.push(setInterval(()=>{ if(my===gen)fetchOne(s); },ms));
+      timers.push(setInterval(()=>{ if(my===gen)fetchOne(s,my); },ms));
     });
-    if(!srcs.length){ vals={}; try{ onVars&&onVars({},status); }catch(e){} }
+    emit();                                   // reflect removals immediately
   }
-  return { setSources, stop, refresh(){ srcs.forEach(fetchOne); },
-           vars(){ return Object.assign({},vals); }, status(){ return status; } };
+  return { setSources, stop, refresh(){ const my=gen; srcs.forEach(s=>fetchOne(s,my)); },
+           vars(){ return combine(); }, status(){ return status; } };
 }
 
 function createBus(){
@@ -1685,7 +1744,10 @@ function makeElRenderer(){
     // show/hide each node — and inline beats the class, so "Max lines" did nothing on
     // most nodes (including the Scripture body, which ships with maxLines:3). Set the
     // display here instead of relying on the class winning.
-    if(s.maxLines&&s.maxLines>0){
+    // Never clamp inside a marquee: .clamp is overflow:hidden + -webkit-box, which
+    // collapses the scrolling track's min-content width so the ticker has nothing to
+    // scroll. Max-lines is meaningless on a single scrolling line anyway.
+    if(s.maxLines&&s.maxLines>0&&!node.closest(".lt-marq")){
       node.classList.add("clamp");
       node.style.webkitLineClamp=String(s.maxLines);
       if(node.style.display!=="none")node.style.display="-webkit-box";
@@ -1755,7 +1817,16 @@ function makeElRenderer(){
     if(t==="clock"){ const lab=(data&&data.clockLabel)||"", tv=(data&&data.clockText)||""; return [lab?(lab+"  \u2014  "+tv):tv]; }
     if(t==="sermonTitle")return [(c.title||"")+(c.sub?"  \u2014  "+c.sub:"")];
     if(t==="bulletList")return (c.bullets||"").split("\n").map(s=>s.trim()).filter(Boolean);
-    if(t==="history"||t==="eventList"){ const items=((data&&data.items)||[]).map(x=>x.ref); return items.length?items:[]; }
+    if(t==="history"||t==="eventList"){
+      // Honour "Max shown" and Order here too. The static path slices; the ticker did
+      // not, so a credits roll scrolled the WHOLE unbounded list and got faster with
+      // every verse logged.
+      let items=((data&&data.items)||[]).map(x=>x.ref);
+      const max=(c.max)||5;
+      items=(t==="eventList")?items.slice(0,max):items.slice(-max);
+      if(c.order==="new")items=items.slice().reverse();
+      return items.length?items:[];
+    }
     return [];
   }
   // Pick the style bucket that matches what marqText() actually returns for this type.
@@ -1866,12 +1937,22 @@ function makeElRenderer(){
       // change — renderAll() runs on every slide and every clock tick.
       if(img._sig!==sig){
         img._sig=sig;
-        const svg=(payload&&payload!=="https://")?qrSvg(payload,{fg:tok(c.fg),bg:tok(c.bg),quiet:c.quiet,transparent:c.plate===false}):null;
+        // Refuse to encode an UNRESOLVED placeholder. It produces a perfectly valid,
+        // perfectly scannable code that sends people to a literal "{{giveUrl}}" URL —
+        // worse than showing nothing, because it looks like it worked.
+        const unresolved=/\{\{[^}]*\}\}/.test(payload);
+        const q=Math.max(0,Math.min(8,Number(c.quiet==null?4:c.quiet)||0));   // bound before it reaches the SVG
+        const svg=(payload&&payload!=="https://"&&!unresolved)
+          ?qrSvg(payload,{fg:tok(c.fg),bg:tok(c.bg),quiet:q,transparent:c.plate===false}):null;
+        img._unresolved=unresolved;
         img.innerHTML=svg||"";
         if(!svg&&interactive){
           const hint=el("div",{style:"display:flex;align-items:center;justify-content:center;height:100%;"+
             "font-size:13px;color:#8aa;text-align:center;padding:8px"});
-          hint.append(document.createTextNode(payload?"That link is too long for a QR code (max 213 characters).":"Add a link in the inspector."));
+          hint.append(document.createTextNode(
+            unresolved?"Waiting for live data — this link still has an unfilled {{placeholder}}."
+            :payload?"That link is too long for a QR code (max 213 bytes)."
+            :"Add a link in the inspector."));
           img.append(hint);
         }
       }
@@ -2104,7 +2185,10 @@ function createStage(scaler,opts){
           const t=want?list.find(x=>ppTimerName(x).toLowerCase()===want)||list.find(x=>ppTimerName(x).toLowerCase().indexOf(want)>=0):list[0];
           if(t){ secs=ppTimerSeconds(t); if(!label) label=ppTimerName(t); }
         }
-        if(secs==null) text=interactive?"--:--":"";      // unknown: blank on air, placeholder in the builder
+        // A pptimer clock whose named timer doesn't exist has nothing to say. Leave the
+        // element off air entirely rather than parking a styled, empty plate there;
+        // keep the placeholder in the builder so it can still be positioned.
+        if(secs==null){ if(!interactive) return null; text="--:--"; }
         else if(secs<=0&&c.hideAtZero) return null;      // "hide when it hits zero" -> element goes off air
         else text=(secs<=0)?(c.zeroText||fmtDur(0,fmt)):fmtDur(secs,fmt);
       } else {
@@ -2131,7 +2215,10 @@ function createStage(scaler,opts){
     // A rule takes precedence over the element's own visibility mode, but NOT over
     // the operator's eye toggle above — hiding something by hand must always win.
     if(ruleState && Object.prototype.hasOwnProperty.call(ruleState,d.id)) return !!ruleState[d.id];
-    if(d.vis==="always") return true;
+    // "Always on screen" must not override an element that explicitly asked to hide.
+    // A clock with "hide at zero" returns null from contentFor; forcing it visible
+    // anyway painted a styled but EMPTY plate on air and left it there.
+    if(d.vis==="always") return !(d.type==="clock" && contentFor(d)===null);
     if(d.vis==="linked") return null;        // resolve through target
     return contentFor(d)!==null;
   }
@@ -2351,6 +2438,12 @@ if(isOutput){
   window.addEventListener("storage",(e)=>{ if(e.key===LS_PROGRAM&&e.newValue){ try{const c=JSON.parse(e.newValue);
     const cc=JSON.stringify(c.conn)!==JSON.stringify(program.conn); program=deepMerge(defaultConfig(),c);
     applyBg(document.body,program.out.bg); stage.setConfig(program); stage.setHistory(history);
+    // Same wiring as the SSE path. This localStorage fallback is what runs when the
+    // relay isn't reachable, and it used to skip both of these — so a PP-timer clock
+    // delivered this way never polled timers, and bound {{placeholders}} never resolved.
+    pp.setWantTimers(wantsPpTimers(program));
+    { const sig=JSON.stringify((program.data&&program.data.sources)||[]);
+      if(sig!==lastDataSrc){ lastDataSrc=sig; dataFeed.setSources((program.data&&program.data.sources)||[]); } }
     if(cc){pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);}
     if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; stage.setHistory(history); }
     if(c._take && c._take!==lastTake){ lastTake=c._take; stage.replayVisible(); } }catch(err){} } });
@@ -2550,6 +2643,11 @@ if(!isOutput){
       if(e.visWith===deadId){ delete e.visWith; if(e.vis==="linked") e.vis="normal"; }   // fall back to visible
       if(e.dock&&e.dock.to===deadId){ e.dock.to=null; e.dock.on=false; }
     });
+    // Rules point at element ids too. A rule left aimed at a deleted element does
+    // nothing, while its dropdown auto-selects the first element and reads as if it
+    // were wired to that one — so the operator "fixes" a rule that was never aimed
+    // where the panel claimed. Null it so the panel shows "(pick an element)".
+    (preview.rules||[]).forEach(r=>{ if(r&&r.target===deadId) r.target=null; });
   }
   function rebuildInspectorLayoutOnly(){ const s=selected(); if(!s)return;
     ["x","y","w","h"].forEach(k=>{ const inp=document.querySelector(`[data-lay="${k}"]`); if(inp)inp.value=Math.round(s.layout[k]);
@@ -2897,6 +2995,10 @@ if(!isOutput){
       if(d.type==="history") c={items:liveLog};
       else if(d.type==="eventList"){ const lines=(d.content.items||"").split("\n").map(s=>s.trim()).filter(Boolean); c={items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
       else if(d.source&&d.source.kind==="live") c=SAMPLE1; else c={};
+      // Stamp the PREVIEW's theme first. This repaints outside renderAll(), so it
+      // otherwise resolved brand tokens against whichever stage rendered last — a
+      // test animation could flash in Program's colours.
+      setCurTheme(preview.theme); setCurVars(cslDataFeed?cslDataFeed.vars():{});
       r.showContent(d,c); },420); }
 
   function contentGroup(d,onCh){
@@ -3006,10 +3108,13 @@ if(!isOutput){
       ]);
     }
     if(t==="qr"){
-      const len=(c.text||"").length;
+      // The limit is 213 BYTES, not characters — an accented letter or emoji costs 2-4.
+      // Counting characters told the operator a link fitted when it did not.
+      let len=0; try{ len=unescape(encodeURIComponent(String(c.text||""))).length; }catch(e){ len=(c.text||"").length; }
       return group("QR code",[
         rowArea("Link or text",c.text,(v)=>{c.text=v;onCh();},"https://church.example.org/give"),
-        el("p",{class:"hint",text:len?(len+" of 213 characters used."):"Paste your giving link. Up to 213 characters."}),
+        el("p",{class:"hint",style:len>213?"color:#ff9d96":"",
+          text:len?(len+" of 213 bytes used."+(len>213?" Too long — shorten the link.":"")):"Paste your giving link. Up to 213 bytes."}),
         rowText("Caption",c.label,(v)=>{c.label=v;onCh();},"e.g. SCAN TO GIVE"),
         rowColor("Code colour",c.fg||"#000000",(v)=>{c.fg=v;onCh();}),
         rowToggle("White backing plate (recommended)",c.plate!==false,(v)=>{c.plate=v;onCh();renderPanels();}),
@@ -3097,7 +3202,9 @@ if(!isOutput){
   function paintDataStatus(vars,st){
     const n=$("dataVars"); if(!n)return;
     n.innerHTML="";
-    const keys=Object.keys(vars||{}).filter(k=>k.indexOf(".")<0).sort();
+    // Show namespaced names too (source.key). Filtering them out hid half the usable
+    // placeholders — exactly the ones you need when two sources share a key.
+    const keys=Object.keys(vars||{}).sort();
     if(!keys.length){ n.append(el("p",{class:"hint",text:"No values yet."})); return; }
     const box=el("div",{style:"font-size:11px;font-family:var(--mono,monospace);line-height:1.7"});
     keys.slice(0,24).forEach(k=>{
@@ -3225,7 +3332,10 @@ if(!isOutput){
     scripture:{ref:{color:"@accent",font:"@display"}, body:{color:"@ink",font:"@body"}},
     reference:{ref:{color:"@accent",font:"@display"}},
     name:{name:{color:"@ink",font:"@display"}, title:{color:"@accent",font:"@body"}},
-    sermonTitle:{title:{color:"@ink",font:"@display"}, sub:{color:"@accent",font:"@body"}},
+    // sub takes @muted: a subtitle IS secondary text, and this gives the Muted swatch
+    // something to actually control — nothing pointed at it before, so the colour
+    // picker was a no-op.
+    sermonTitle:{title:{color:"@ink",font:"@display"}, sub:{color:"@muted",font:"@body"}},
     text:{text:{color:"@ink",font:"@body"}},
     bulletList:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
     history:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
@@ -3565,8 +3675,12 @@ if(!isOutput){
       const rd=new FileReader();
       rd.onerror=()=>alert("Couldn't read that file.");
       rd.onload=()=>{
-        const r=parseGfx(String(rd.result||""));
-        if(!r.ok){ alert("Import failed.\n\n"+r.error); return; }   // nothing written on failure
+        // parseGfx validates, but a pathological file can still throw inside it (deep
+        // nesting, a getter, a hostile shape). Catch here so a bad import reports a
+        // failure instead of dying silently with the console half-rendered.
+        let r; try{ r=parseGfx(String(rd.result||"")); }
+        catch(e){ alert("Import failed.\n\nThat file couldn't be read as a graphic.\n\n"+String((e&&e.message)||e)); return; }
+        if(!r||!r.ok){ alert("Import failed.\n\n"+((r&&r.error)||"Unrecognised file.")); return; }   // nothing written on failure
         if(r.kind==="element"){
           preview.elements.push(r.payload); selectedId=r.payload.id;
           savePreview(); applyPreview(); renderPanels();

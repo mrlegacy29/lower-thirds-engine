@@ -84,8 +84,9 @@ let state = { on: false, device: null, mode: null, level: 255, frames: 0, droppe
 let onChange = null;
 let lastPaintAt = 0;     // renderer heartbeat — proves the page is still producing pixels
 let lastFrameAt = 0;     // card heartbeat — proves the DeckLink is still taking frames
-let recentDrops = 0;     // drops since the last health sample, so an old fault doesn't stick red
+// (recentDrops removed: health() must not mutate state as a side effect of being read)
 let deviceCaps = null;   // what the selected card says it can do (external keying, etc.)
+let rendererDead = false; // the offscreen renderer crashed — output is frozen/blank
 const notify = () => { try { onChange && onChange(status()); } catch (e) {} };
 
 function available() {
@@ -151,10 +152,16 @@ function startRenderer(url, mode) {
       lastPaintAt = Date.now();
     } catch (e) { /* drop this frame, keep the last good one */ }
   });
+  // A crashed renderer stops painting but the pump keeps sending the LAST frame, so the
+  // graphic freezes on air while the lamp stays green. Record it so health() can go red,
+  // and blank the output rather than leaving a stale graphic up.
   win.webContents.on("render-process-gone", (_e, d) => {
-    state.error = "Output renderer crashed (" + ((d && d.reason) || "unknown") + ")";
+    state.error = "Output renderer crashed (" + ((d && d.reason) || "unknown") + "). Stop and start SDI output to recover.";
+    rendererDead = true;
+    latest = null;                 // pump falls back to a transparent frame
     notify();
   });
+  win.webContents.on("unresponsive", () => { state.error = "Output renderer is unresponsive."; notify(); });
   return win.loadURL(url);
 }
 
@@ -169,7 +176,12 @@ async function pump() {
   const blank = Buffer.alloc(state._bytes, 0);   // fully transparent until the page paints
   while (running && playback && myGen === pumpGen) {
     try {
-      const frame = latest || blank;
+      // Validate the BYTE LENGTH, not just getSize(). A mid-resize paint can hand back
+      // a buffer that doesn't match the mode's frame size, and passing that to the
+      // driver is undefined behaviour — garbage or a crash on air. Fall back to a
+      // transparent frame instead.
+      let frame = latest || blank;
+      if (!frame || frame.length !== state._bytes) frame = blank;
       await playback.displayFrame(frame);
       state.frames++;
       lastFrameAt = Date.now();
@@ -178,7 +190,7 @@ async function pump() {
         notify();                                  // ~0.5s heartbeat so the lamp is responsive
       }
     } catch (e) {
-      state.dropped++; recentDrops++;
+      state.dropped++;
       if (!running) break;
       state.error = String((e && e.message) || e);
       notify();
@@ -210,7 +222,7 @@ async function start(opts) {
 
   state = { on: false, device: deviceIndex, mode: mode.id, level, frames: 0, dropped: 0, error: null, reference: null };
   state._bytes = mode.w * mode.h * 4;
-  latest = null; lastPaintAt = 0; lastFrameAt = 0; recentDrops = 0;
+  latest = null; lastPaintAt = 0; lastFrameAt = 0; rendererDead = false;
   try { deviceCaps = (await listDevices()).find((d) => d.index === deviceIndex) || null; } catch (e) { deviceCaps = null; }
 
   try {
@@ -315,6 +327,10 @@ function health() {
   add("keyer", "External keyer (fill + key) enabled", deviceCaps && deviceCaps.keyable === false ? "warn" : "ok",
       deviceCaps && deviceCaps.keyable === false ? "Card did not report external-keying support — output may be fill-only." : "");
 
+  if (rendererDead) {
+    add("render", "Graphics page rendering", "fail", "The output renderer crashed — the picture is frozen. Stop and start SDI output.");
+    return { level: "red", checks, summary: "Output renderer crashed" };
+  }
   const paintAge = lastPaintAt ? now - lastPaintAt : Infinity;
   // The page legitimately stops painting when nothing changes, so a quiet renderer
   // is only a problem if it never painted at all.
@@ -325,9 +341,11 @@ function health() {
   if (frameAge > 2000) add("frames", "Card accepting frames", "fail", "No frame accepted in " + Math.round(frameAge / 1000) + "s — output has stalled.");
   else add("frames", "Card accepting frames", "ok", state.frames + " sent");
 
-  if (recentDrops > 0) add("drops", "No dropped frames", "warn", recentDrops + " dropped since last check");
+  // Report the TOTAL, and do not mutate state from a read. health() is called by
+  // status(), so zeroing here meant whoever polled status() first consumed the drop
+  // count and the console's lamp usually never saw it.
+  if (state.dropped > 0) add("drops", "No dropped frames", "warn", state.dropped + " dropped in total");
   else add("drops", "No dropped frames", "ok", "");
-  recentDrops = 0;
 
   // Genlock is a quality signal, not a hard failure: an un-genlocked card still
   // outputs, it just risks drift against the ATEM's clock over a long service.
@@ -363,12 +381,24 @@ const TEST_CARD =
   "text-shadow:0 2px 8px #000'>bars = FILL &nbsp;·&nbsp; white silhouette = KEY &nbsp;·&nbsp; centre box must key through</div>" +
   "</body></html>";
 
+let testing = false, testRestoreUrl = null;
 async function testPattern(seconds) {
   if (!running || !win || win.isDestroyed()) throw new Error("Start the SDI output first.");
-  const back = win.webContents.getURL();
-  await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(TEST_CARD));
-  await new Promise((r) => setTimeout(r, Math.max(1, Math.min(60, Number(seconds) || 10)) * 1000));
-  if (running && win && !win.isDestroyed()) await win.loadURL(back);
+  // Re-entrancy guard. Without it, a second press captured `back` from the window that
+  // was ALREADY showing the test card, so the "restore" put the test card up
+  // permanently — the graphics never came back and only a Stop/Start recovered.
+  if (testing) return status();
+  testing = true;
+  testRestoreUrl = win.webContents.getURL();
+  try {
+    await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(TEST_CARD));
+    await new Promise((r) => setTimeout(r, Math.max(1, Math.min(60, Number(seconds) || 10)) * 1000));
+  } finally {
+    // Always restore, even if the wait was interrupted — otherwise the test card
+    // stays on air.
+    try { if (running && win && !win.isDestroyed() && testRestoreUrl) await win.loadURL(testRestoreUrl); } catch (e) {}
+    testRestoreUrl = null; testing = false;
+  }
   return status();
 }
 
