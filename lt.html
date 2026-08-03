@@ -1007,7 +1007,7 @@ function evalRules(rules,ctx){
 
 function defaultConfig(){
   return {
-    conn:{host:"",port:1025,pollMs:200,clearRule:"pres",clearLayer:"media"},
+    conn:{host:"",port:1025,pollMs:200,clearRule:"all",clearLayer:"media"},
     out:{bg:"transparent",safe:false},
     theme:defaultTheme(),
     rules:[],
@@ -1017,11 +1017,24 @@ function defaultConfig(){
     elements:[ createElement("scripture"), createElement("history") ]
   };
 }
-// One-time migration: the original clear-detection default was "all" (all layers off), which can't
-// tell Clear Slide from Clear All in a slides-only service. Presentation-based detection ("pres")
-// is now preferred. Flip the OLD default once; an explicit operator choice sets _ruleMig and sticks.
+/* Clear-detection default — CORRECTED against real hardware (ProPresenter 21.2, 2026-08-03).
+   v1.0.4 switched the default to "pres" on the belief that /v1/presentation/active stays
+   populated through Clear Slide and only goes null on Clear All. Measured on a real rig,
+   that is NOT true — it goes null for BOTH, so "pres" can never tell them apart and every
+   Clear Slide was treated as a full clear (the ref-list header disappeared on F2):
+
+     state         slide   media   presentation
+     slide live    true    true    populated
+     Clear Slide   false   TRUE    null
+     Clear All     false   FALSE   null
+
+   `media` is the real discriminator, which is exactly what the "all layers off" rule uses.
+   Default is back to "all". _ruleMig2 flips a config that still carries the bad "pres"
+   default once; an explicit operator pick sets _ruleMig and is never touched. */
 function migrateClearRule(cfg){
-  if(cfg&&cfg.conn&&cfg.conn.clearRule==="all"&&!cfg.conn._ruleMig){ cfg.conn.clearRule="pres"; cfg.conn._ruleMig=true; }
+  if(cfg&&cfg.conn&&cfg.conn.clearRule==="pres"&&!cfg.conn._ruleMig&&!cfg.conn._ruleMig2){
+    cfg.conn.clearRule="all"; cfg.conn._ruleMig2=true;
+  }
   return cfg;
 }
 
@@ -1589,7 +1602,11 @@ function createPP(opts){
       // Timers are only polled when a clock element is actually mirroring one, so
       // the common config pays nothing for this.
       if(wantTimers){
-        try{ const tr=await ppGet("/v1/timers",sig);
+        // /v1/timers returns the timer DEFINITIONS (countdown.duration etc) — polling
+        // that showed a frozen configured value instead of a running clock. The LIVE
+        // values are on /v1/timers/current: [{id:{name,index,uuid}, time:"00:05:00",
+        // state:"stopped"|"running"}]. Verified against ProPresenter 21.2.
+        try{ const tr=await ppGet("/v1/timers/current",sig);
           if(tr.ok){ const tj=await tr.json();
             const arr=Array.isArray(tj)?tj:(Array.isArray(tj&&tj.data)?tj.data:(Array.isArray(tj&&tj.timers)?tj.timers:[]));
             try{ opts.onTimers && opts.onTimers(arr); }catch(e){} }
@@ -3168,7 +3185,7 @@ if(!isOutput){
       el("p",{class:"hint",html:"<b>Clear detect</b> reads ProPresenter's slide layer so F1/F2/clear actually hides the graphic. If it shows <i>n/a (text mode)</i>, your build didn't return layer status \u2014 it falls back to empty-text detection."}),
       el("div",{class:"grp"},[el("div",{class:"gh",text:"Clear behavior \u2014 Previously-Referenced list"}),
         el("p",{class:"hint",html:"The list clears whenever you clear the slide. The <b>header</b> stays through <b>Clear Slide (F2)</b> but disappears on <b>Clear All</b>. Pick how the app detects a full Clear All, and watch the live signals as you test."}),
-        rowSeg("Detect a full Clear All by",cn.clearRule||"pres",
+        rowSeg("Detect a full Clear All by",cn.clearRule||"all",
           [["pres","Presentation cleared"],["all","All layers off"],["layer","A layer turns off"],["manual","Never (manual only)"]],
           (v)=>{cn.clearRule=v;cn._ruleMig=true;savePreview();renderPanels();}),
         (cn.clearRule==="layer")?rowSelect("\u2026this layer turns off",cn.clearLayer||"media",
@@ -3180,7 +3197,7 @@ if(!isOutput){
         (function(){ const n=el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"});
           setTimeout(()=>{ try{ renderClearDiag(); }catch(e){} },0); return n; })(),
         el("div",{class:"row"},[el("button",{class:"btn sm full",text:"Clear scripture list now",onclick:()=>{manualClearList();}})]),
-        el("p",{class:"hint",html:"<b>Presentation cleared</b> (recommended) keeps the header up on Clear Slide and removes it on Clear All. Changes reach the OBS output after the next <b>Take</b>."})
+        el("p",{class:"hint",html:"<b>All layers off</b> (recommended) keeps the header up on Clear Slide and removes it on Clear All. Measured on ProPresenter 21.2: Clear Slide leaves <i>media</i> on, Clear All turns everything off — while <i>presentation</i> reports cleared for <b>both</b>, so “Presentation cleared” cannot tell them apart on that build. Use it only if the live readout above shows otherwise on your rig. Changes reach the OBS output after the next <b>Take</b>."})
       ])
     ],false,"conn");
   }

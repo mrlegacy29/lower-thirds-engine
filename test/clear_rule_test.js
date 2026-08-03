@@ -1,5 +1,15 @@
 // Clear Behavior: the reference LIST clears on ANY clear; the HEADER stays through a
-// Clear Slide (presentation still active) and hides on a Clear All (presentation cleared),
+// Clear Slide and hides on a Clear All.
+//
+// CORRECTED 2026-08-03 against real hardware (ProPresenter 21.2). These fixtures used to
+// model Clear Slide as "presentation still active", which is NOT what ProPresenter does —
+// measured, it reports presentation:null for BOTH clears, so that model could never have
+// worked and the test was validating a fiction:
+//     state         slide   media   presentation
+//     slide live    true    true    populated
+//     Clear Slide   false   TRUE    null
+//     Clear All     false   FALSE   null
+// `media` is the real discriminator, which is what the default "all layers off" rule uses.
 // distinguished via /v1/presentation/active — even in a slides-only service. Plus the rule
 // unit logic and the manual "Clear list" button.
 const { JSDOM } = require('jsdom');
@@ -31,7 +41,7 @@ const pgList = () => { const e = pgEl('.h-items'); return e ? [...e.querySelecto
 const pgHeadingShown = () => { const w = [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector('.h-label')); const h = w && w.querySelector('.h-label'); return !!h && h.style.display !== 'none'; };
 const btnByText = (re) => [...D.querySelectorAll('button')].find(b => re.test(b.textContent));
 const selType = (ty) => { const row = [...D.querySelectorAll('.elrow')].find(r => r.querySelector('.ty') && r.querySelector('.ty').textContent === ty); if (row) click(row.querySelector('.nm')); };
-const VERSE = { slide: true, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
+const VERSE = { slide: true, media: true, props: false, messages: false, announcements: false, audio: false, video_input: false };
 const ALL_OFF = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
 let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL**') + '  ' + n); c ? pass++ : fail++; };
 
@@ -60,10 +70,12 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   ok('verses accumulate while live', pgList().includes('John 3:16') && pgList().includes('Romans 8:28'));
   ok('header shown while the list has items', pgHeadingShown());
 
-  // F2 (Clear Slide): slides-only -> every layer off, but presentation STILL active
-  slideText = ''; slideActive = false; presActive = true; layersObj = Object.assign({}, ALL_OFF); await sleep(700);
+  // F2 (Clear Slide) as ProPresenter actually reports it: slide off, MEDIA STILL ON,
+  // presentation cleared. Not a full clear -> the header stays.
+  const CLEAR_SLIDE = Object.assign({}, ALL_OFF, { media: true });
+  slideText = ''; slideActive = false; presActive = false; layersObj = Object.assign({}, CLEAR_SLIDE); await sleep(700);
   ok('F2: list CLEARS', pgList().length === 0);
-  ok('F2: header STAYS up (presentation still active)', pgHeadingShown());
+  ok('F2: header STAYS up (media still on -> not a full clear)', pgHeadingShown());
 
   // re-populate, then F1 (Clear All): presentation cleared
   slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = Object.assign({}, VERSE); await sleep(400);

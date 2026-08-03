@@ -53,10 +53,13 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
   slideText = 'Romans 8:28\nAnd we know.'; await sleep(400);
   ok('second verse logged on output', outList().includes('Romans 8:28'));
 
-  // F2 (Clear Slide): presentation still active -> list clears but the header STAYS
-  slideText = ''; slideActive = false; presActive = true; layersObj = { slide: false, media: false }; await sleep(700);
+  // F2 (Clear Slide) as ProPresenter 21.2 actually reports it (measured 2026-08-03):
+  // slide off but MEDIA STILL ON, and presentation cleared. Not a full clear, so the
+  // list clears and the header STAYS. The old fixture modelled this as "presentation
+  // still active", which the real API never does for either clear.
+  slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: true }; await sleep(700);
   ok('F2: output ref list clears', outList().length === 0);
-  ok('F2: output header STAYS (presentation still active)', outHeadingShown());
+  ok('F2: output header STAYS (media still on -> not a full clear)', outHeadingShown());
 
   // re-populate, then F1 (Clear All): presentation cleared -> list clears AND header hides
   slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = { slide: true, media: false }; await sleep(400);

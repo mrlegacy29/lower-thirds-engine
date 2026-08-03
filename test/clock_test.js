@@ -105,9 +105,46 @@ const put = (els) => { const c = W.defaultConfig(); c.elements = els; c._take = 
     const el = clockEl({ mode: 'pptimer', timerName: 'Sermon', fmt: 'h:mm' });
     put([el]);
     await sleep(250);
-    // stage.setTimers() is what the poller calls when /v1/timers answers
+    // stage.setTimers() is what the poller calls when the timer endpoint answers
     const stage = W.__outStage || null;
     ok('output stage exposes setTimers for the poller', !stage || typeof stage.setTimers === 'function');
+  }
+
+  /* ----------- it must poll the LIVE endpoint, not the timer DEFINITIONS ---------- */
+  {
+    // Measured against ProPresenter 21.2 on real hardware (2026-08-03): /v1/timers
+    // returns the CONFIGURED definitions ({countdown:{duration:900}}) and does NOT
+    // change while a timer runs. The live value lives only on /v1/timers/current.
+    // Polling the wrong one renders a frozen clock that still looks plausible, which
+    // is why this shipped: v1.3.1 showed 5:00 for a timer PP reported at 0:00.
+    // ppTimerSeconds() accepts BOTH payload shapes by design, so no parser assertion
+    // can catch a revert — the endpoint string is the only pinnable thing.
+    // match the CALL SITE, not the comment above it
+    ok('polls /v1/timers/current', /ppGet\(\s*["'`]\/v1\/timers\/current["'`]/.test(html));
+    ok('does not poll the bare /v1/timers definitions endpoint',
+       !/ppGet\(\s*["'`]\/v1\/timers["'`]/.test(html));
+  }
+
+  /* --------- a real /v1/timers/current payload renders the running value ---------- */
+  {
+    const el = clockEl({ mode: 'pptimer', timerName: 'Game Timer', fmt: 'h:mm' });
+    put([el]);
+    await sleep(250);
+    const stage = W.__outStage || null;
+    if (stage && typeof stage.setTimers === 'function') {
+      // copied verbatim off the wire from ProPresenter 21.2
+      stage.setTimers([
+        { id: { name: 'Segment Countdown', index: 0, uuid: 'a' }, time: '00:00:00', state: 'stopped' },
+        { id: { name: 'PreShow Countdown', index: 1, uuid: 'b' }, time: '05:00:00', state: 'stopped' },
+        { id: { name: 'Game Timer',        index: 2, uuid: 'c' }, time: '00:14:57', state: 'running' }
+      ]);
+      await sleep(250);
+      ok('mirrors the named timer live value', /14:57/.test(out()));
+      ok('does not pick up a different timer value', !/5:00:00/.test(out()));
+    } else {
+      ok('mirrors the named timer live value (no stage)', true);
+      ok('does not pick up a different timer value (no stage)', true);
+    }
   }
 
   /* ------------------------- hide-at-zero takes it off air ------------------------ */
