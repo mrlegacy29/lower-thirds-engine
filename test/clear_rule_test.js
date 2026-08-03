@@ -10,8 +10,8 @@
 //     Clear Slide   false   TRUE    null
 //     Clear All     false   FALSE   null
 // `media` is the real discriminator, which is what the default "all layers off" rule uses.
-// distinguished via /v1/presentation/active — even in a slides-only service. Plus the rule
-// unit logic and the manual "Clear list" button.
+// Also covers the rule unit logic, the one-time clearRule migration, and the manual
+// "Clear list" button.
 const { JSDOM } = require('jsdom');
 const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'lt.html'), 'utf8');
 const errors = [];
@@ -95,6 +95,48 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   ok('auto-clear OFF: list persists through a clear', pgList().includes('Isaiah 40:31'));
   click(btnByText(/Clear scripture list now/i)); await sleep(700);
   ok('manual Clear list empties the list', pgList().length === 0);
+
+  /* ---------------- the one-time clearRule migration (was untested) ----------------
+     migrateClearRule() rewrites a saved setting on EVERY load, for every existing
+     install, and had no coverage at all. The case that matters most is (c): an operator
+     who deliberately chose "pres" must keep it — silently overriding a deliberate
+     choice would be worse than the bug the migration exists to fix.
+     Case (b) is Brandon's real stored config, read out of his running app on 1.3.3. */
+  {
+    const M = W.migrateClearRule;
+    ok('migration: reachable', typeof M === 'function');
+
+    const fresh = W.defaultConfig();
+    ok('migration: a new config already defaults to "all"', fresh.conn.clearRule === 'all');
+
+    // (b) a config saved by v1.3.1 — "pres" with no migration flags
+    const stored = { conn: { host: '', port: 1025, pollMs: 200, clearRule: 'pres', clearLayer: 'media' } };
+    M(stored);
+    ok('migration: a stored "pres" flips to "all" and stamps _ruleMig2',
+       stored.conn.clearRule === 'all' && stored.conn._ruleMig2 === true);
+
+    // (c) an explicit operator pick sets _ruleMig and must survive
+    const chosen = { conn: { clearRule: 'pres', _ruleMig: true } };
+    M(chosen);
+    ok('migration: a DELIBERATE "pres" pick is preserved', chosen.conn.clearRule === 'pres');
+
+    // (d) idempotent — repeated loads must not thrash the value
+    const twice = { conn: { clearRule: 'pres' } };
+    M(twice); const afterFirst = twice.conn.clearRule; M(twice); M(twice);
+    ok('migration: idempotent across repeated loads',
+       afterFirst === 'all' && twice.conn.clearRule === 'all');
+
+    // (e) the other rules are none of its business
+    const layer = { conn: { clearRule: 'layer' } }, manual = { conn: { clearRule: 'manual' } },
+          all = { conn: { clearRule: 'all' } };
+    M(layer); M(manual); M(all);
+    ok('migration: leaves "layer"/"manual"/"all" alone',
+       layer.conn.clearRule === 'layer' && manual.conn.clearRule === 'manual' && all.conn.clearRule === 'all');
+
+    let threw = false;
+    try { M(null); M(undefined); M({}); M({ conn: null }); } catch (e) { threw = true; }
+    ok('migration: a malformed config does not throw', !threw);
+  }
 
   console.log('CLEAR-RULE RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));
   process.exit(fail ? 1 : 0);
