@@ -40,6 +40,11 @@ const dom = new JSDOM(html, {
 });
 const W = dom.window, D = dom.window.document;
 const out = () => (D.querySelector('#out-scaler') || {}).textContent || '';
+// out() reads textContent, which still includes elements that have been taken OFF AIR
+// (they stay in the DOM at opacity 0). For "is this actually showing?" use this instead.
+const onAir = () => [...D.querySelectorAll('#out-scaler .lt-el')]
+  .filter(e => e.style.opacity !== '0')
+  .map(e => e.textContent).join(' ');
 const push = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
 let take = 500;
 const clockEl = (content) => { const e = W.createElement('clock'); e.content = Object.assign({}, e.content, content); return e; };
@@ -174,8 +179,46 @@ const putLive = (els) => {
     // once it's more than a minute stale, which this is not)
     put([clockEl({ mode: 'countdown', target: hhmm, hideAtZero: false, zeroText: 'WE ARE LIVE' })]);
     await sleep(300);
-    const shown = out();
-    ok('at/past zero it shows the configured zero text', /WE ARE LIVE/.test(shown) || /\d:\d{2}/.test(shown));
+    // The `|| /\d:\d{2}/.test(shown)` alternative that used to be here matched ANY rendered
+    // clock, so "Show at zero" could be deleted outright and this still passed. The whole
+    // point of the feature is that a run-out countdown shows something deliberate instead of
+    // a negative number ticking upward on air, so assert exactly that.
+    ok('at/past zero it shows the configured zero text', /WE ARE LIVE/.test(out()));
+
+    // and the sibling this section is named after, which was never actually tested
+    put([clockEl({ mode: 'countdown', target: hhmm, hideAtZero: true, zeroText: 'WE ARE LIVE' })]);
+    await sleep(300);
+    ok('hide-at-zero takes the element off air', !/WE ARE LIVE/.test(onAir()));
+  }
+
+  /* ---------------- a stray space in the timer name must still match ----------------
+     Case was tolerated but whitespace was not — and a trailing space is exactly what you
+     get pasting a name out of ProPresenter. Untrimmed it matched nothing, and a pptimer
+     clock with no match is left OFF AIR, so the countdown simply never appeared in OBS. */
+  {
+    timersPayload = [{ id: { name: 'Game Timer', index: 0, uuid: 'c' }, time: '00:12:34', state: 'running' }];
+    putLive([clockEl({ mode: 'pptimer', timerName: '  Game Timer ', fmt: 'h:mm' })]);
+    await sleep(900);
+    ok('a timer name with stray whitespace still matches', /12:34/.test(out()));
+  }
+
+  /* ------- an unrecognised timers body must HOLD, not blank the clock on air -------
+     A 200 OK carrying a shape we don't know (a keyed map on some PP build, or an error
+     envelope during a hiccup) used to fall back to [] — reporting "no timers" and pulling
+     the countdown off air, while a hard 404 correctly held the last value. */
+  {
+    timersPayload = [{ id: { name: 'Game Timer', index: 0, uuid: 'c' }, time: '00:09:09', state: 'running' }];
+    putLive([clockEl({ mode: 'pptimer', timerName: 'Game Timer', fmt: 'h:mm' })]);
+    await sleep(900);
+    ok('baseline: the mirrored timer is on air', /9:09/.test(onAir()));
+
+    timersPayload = { unexpected: 'shape', not: 'an array' };   // 200 OK, unknown envelope
+    await sleep(800);
+    ok('an unrecognised timers body holds the last value instead of blanking', /9:09/.test(onAir()));
+
+    timersPayload = [];                                          // recognised, genuinely empty
+    await sleep(800);
+    ok('a recognised EMPTY array does take it off air', !/9:09/.test(onAir()));
   }
 
   /* --------------------- the element is offered in the builder -------------------- */

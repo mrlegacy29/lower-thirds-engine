@@ -94,7 +94,10 @@ function render(s) {
 
   if (s.status === "available" || s.status === "downloading") {
     const key = "dl:" + (s.newVersion || "");
-    bannerEl.dataset.key = key; if (dismissed === key) return;
+    // hide() before returning. A bare `return` left the banner VISIBLE still carrying
+    // whatever text the previous status wrote, with the install button hidden — so it could
+    // sit on screen reading "downloading..." with no way to install.
+    bannerEl.dataset.key = key; if (dismissed === key) { hide(); return; }
     if (s.status === "downloading") {
       bannerEl._barWrap.style.display = "";
       bannerEl._bar.style.width = (s.percent || 0) + "%";
@@ -105,7 +108,7 @@ function render(s) {
     show();
   } else if (s.status === "ready") {
     const key = "ready:" + (s.newVersion || "");
-    bannerEl.dataset.key = key; if (dismissed === key) return;
+    bannerEl.dataset.key = key; if (dismissed === key) { hide(); return; }
     bannerEl.classList.add("ready");
     textEl.innerHTML = "<b>Update ready</b>" + (s.newVersion ? " (v" + s.newVersion + ")" : "") + " \u2014 restart to install.";
     btnEl.style.display = "";

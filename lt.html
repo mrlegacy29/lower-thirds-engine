@@ -1660,8 +1660,15 @@ function createPP(opts){
         // state:"stopped"|"running"}]. Verified against ProPresenter 21.2.
         try{ const tr=await ppGet("/v1/timers/current",sig);
           if(tr.ok){ const tj=await tr.json();
-            const arr=Array.isArray(tj)?tj:(Array.isArray(tj&&tj.data)?tj.data:(Array.isArray(tj&&tj.timers)?tj.timers:[]));
-            try{ opts.onTimers && opts.onTimers(arr); }catch(e){} }
+            // null (not []) when the body is a shape we don't recognise. Falling back to []
+            // meant a 200 with an unexpected envelope — a keyed object map on some PP build,
+            // or an error envelope during a hiccup — reported "no timers" and pulled the
+            // countdown OFF AIR, while a hard 404 correctly held the last value. The worse
+            // failure degraded gracefully and the milder one didn't; now both hold.
+            // A recognised but EMPTY array still passes through: that legitimately means
+            // "this rig has no timers".
+            const arr=Array.isArray(tj)?tj:(Array.isArray(tj&&tj.data)?tj.data:(Array.isArray(tj&&tj.timers)?tj.timers:null));
+            if(arr){ try{ opts.onTimers && opts.onTimers(arr); }catch(e){} } }
         }catch(e){ /* transient — keep the last known timers */ }
         if(!running || myGen!==gen) return;
       }
@@ -2249,9 +2256,15 @@ function createStage(scaler,opts){
         let secs=null;
         if(c.mode==="countdown"){ secs=secsUntilClock(c.target,now); }
         else {
-          const want=String(c.timerName||"").toLowerCase();
+          // Trim both sides. Case was already tolerated but whitespace was not, which is the
+          // opposite of what a name field should do — and a trailing space is exactly what you
+          // get pasting a timer name out of ProPresenter. Untrimmed, one stray space matched
+          // nothing and (per the rule just below) left the countdown off air in OBS entirely,
+          // while the console builder still showed a plausible "--:--" placeholder.
+          const want=String(c.timerName||"").trim().toLowerCase();
           const list=Array.isArray(timers)?timers:[];
-          const t=want?list.find(x=>ppTimerName(x).toLowerCase()===want)||list.find(x=>ppTimerName(x).toLowerCase().indexOf(want)>=0):list[0];
+          const nm=x=>ppTimerName(x).trim().toLowerCase();
+          const t=want?list.find(x=>nm(x)===want)||list.find(x=>nm(x).indexOf(want)>=0):list[0];
           if(t){ secs=ppTimerSeconds(t); if(!label) label=ppTimerName(t); }
         }
         // A pptimer clock whose named timer doesn't exist has nothing to say. Leave the

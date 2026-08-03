@@ -254,9 +254,17 @@ function decode(q){
       let read2 = '';
       for (let i = 0; i < 15; i++) read2 += ((i < 7) ? m[s - 1 - i][8] : m[8][s - 15 + i]) ? '1' : '0';
       ok('format: copy 2 carries the identical string', read2 === read);
-      ok('format: the mask read back is the mask actually used',
-         M_FORMAT.indexOf(read) === ((W.qrFormatBits(M_FORMAT.indexOf(read)) >>> 0).toString(2).padStart(15,'0') === read
-           ? M_FORMAT.indexOf(read) : -1));
+      // This used to read `k === (cond ? k : -1)`, which is true for EVERY input — including
+      // a completely garbage format word, since a miss gives k=-1 and the false branch is
+      // also -1. Zero information. Replaced with a real round trip: the string physically
+      // placed in the modules must map to a mask in range, and qrFormatBits() for that mask
+      // must reproduce it exactly.
+      {
+        const k = M_FORMAT.indexOf(read);
+        const rebuilt = k >= 0 ? (W.qrFormatBits(k) >>> 0).toString(2).padStart(15, '0') : null;
+        ok('format: the placed string round-trips through qrFormatBits for a valid mask 0-7',
+           k >= 0 && k <= 7 && rebuilt === read);
+      }
     }
 
     /* ------------------------------ structure ------------------------------ */

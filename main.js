@@ -154,7 +154,14 @@ function setupUpdater() {
     updateState = { status: "current", announce: manualCheck }; pushUpdateState();
   });
   autoUpdater.on("download-progress", (p) => { updateState = { status: "downloading", percent: Math.round(p.percent || 0) }; pushUpdateState(); });
-  autoUpdater.on("update-downloaded", (info) => { updateState = { status: "ready", newVersion: info && info.version }; pushUpdateState(); });
+  autoUpdater.on("update-downloaded", (info) => {
+    // Stop the 5-minute poll: the installer is on disk and there is nothing left to find.
+    // Left running, a later check re-emitted "update-available" for the SAME version, which
+    // knocked the banner from "Update ready" (with its Restart & Install button) back to a
+    // false "downloading..." with no button — every 5 minutes, for the rest of the service.
+    if (updateTimer) { clearInterval(updateTimer); updateTimer = null; }
+    updateState = { status: "ready", newVersion: info && info.version }; pushUpdateState();
+  });
   autoUpdater.on("error", (err) => { updateState = { status: "error", message: String(err && err.message || err), quiet: !manualCheck }; pushUpdateState(); });
 }
 
