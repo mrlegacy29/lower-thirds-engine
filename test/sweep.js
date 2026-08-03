@@ -63,11 +63,17 @@ setTimeout(async()=>{
   }
 
   // ---- add each element type, select it, ensure inspector builds w/o error ----
-  const types=['reference','name','sermonTitle','bulletList','history','text'];
+  // Resolve each type to its REAL button label. The old ad-hoc regex mapped 'history' to
+  // 'Event', so it clicked the Event-list button twice and never added the Scripture-ref-list
+  // type this assertion claims to cover — while 'eventList' was not in the list at all.
+  const LABELS={reference:'Reference',name:'Name',sermonTitle:'Sermon',bulletList:'Bullet',
+                history:'Scripture ref list',eventList:'Event list',text:'Text',
+                clock:'Timer',qr:'QR'};
+  const types=['reference','name','sermonTitle','bulletList','history','eventList','text','clock','qr'];
   let addErrs=0;
   types.forEach(t=>{
     const before=errors.length;
-    const add=[...D.querySelectorAll('.addmenu .btn')].find(b=>new RegExp(t==='sermonTitle'?'Sermon':t==='bulletList'?'Bullet':t==='history'?'Event':t,'i').test(b.textContent));
+    const add=[...D.querySelectorAll('.addmenu .btn')].find(b=>new RegExp(LABELS[t]||t,'i').test(b.textContent));
     if(add){ click(add); } else { errors.push('add btn missing for '+t); }
     if(errors.length!==before) addErrs++;
   });

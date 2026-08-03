@@ -69,7 +69,16 @@ const simClear=()=>click(D.getElementById('simClear'));
   /* ---------- YIELD: drop beneath an overlapping live scripture ---------- */
   setSel(selByLabel('Stacking layer'),'10'); await sleep(10);
   setTog(swByLabel('Yield'),true); await sleep(10);
-  simV(); await sleep(40);   // scripture active + overlaps (both at 120,820)
+  // The stock scripture is now (120,720,1100,280) and the Text element is (120,820,900,160),
+  // so they still overlap from y=820 down — but assert the precondition rather than trusting
+  // a comment, or this silently stops testing yield if either default moves again.
+  {
+    const scr = W.createElement('scripture'), txt = W.createElement('text');
+    const a = scr.layout, b2 = txt.layout;
+    ok('yield fixture precondition: scripture and text actually overlap',
+       Math.min(a.y + a.h, b2.y + b2.h) - Math.max(a.y, b2.y) > 0);
+  }
+  simV(); await sleep(40);   // scripture on air and overlapping the Text element
   ok('yield: drops below overlapping scripture (z -1)', Broot().style.zIndex==='-1');
   simClear(); await sleep(40);
   ok('yield: returns to its layer when scripture clears (z 10)', Broot().style.zIndex==='10');

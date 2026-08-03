@@ -608,6 +608,13 @@ function createElement(type){
                  time:styleDefaults({font:"'Oswald',sans-serif",size:76,weight:"700",color:"#ffffff"}) };
     base.box=boxDefaults();
   }
+  // Derive the dock (the element's "second position") from the layout the type actually
+  // settled on. It used to be a hardcoded 120,820,620,160 in the base literal, which was the
+  // old lower-third box — so after the v1.3.3 geometry change, docking the stock scripture
+  // yanked it 100px down and shrank it from 280 to 160, back under the height its own
+  // maxLines:3 body needs. Defaulting to the element's own home means dock starts as a no-op
+  // and only moves things where the operator has actually set it.
+  base.dock={on:false,to:"",x:base.layout.x,y:base.layout.y,w:base.layout.w,h:base.layout.h};
   return base;
 }
 
@@ -2377,7 +2384,17 @@ function createStage(scaler,opts){
     ruleState=evalRules(cfg&&cfg.rules, d?{text:d.rawText||d.body||"",ref:d.ref||"",cleared:false}:{cleared:true});
     renderAll();
   }
-  function setTimers(list){ timers=Array.isArray(list)?list:[]; if(hasClock())renderAll(); }
+  let timersSig="";
+  function setTimers(list){
+    // Repaint only when the payload actually changed. The PP timer poll runs at pollMs
+    // (~5Hz), and renderAll() rebuilds EVERY element on the on-air page — so one mirrored
+    // clock made the whole output re-render 5x a second instead of once per visible tick.
+    timers=Array.isArray(list)?list:[];
+    let sig=""; try{ sig=JSON.stringify(timers); }catch(e){ sig=String(timers&&timers.length); }
+    if(sig===timersSig) return;
+    timersSig=sig;
+    if(hasClock())renderAll();
+  }
   function setVars(v){ dataVars=(v&&typeof v==="object")?v:{}; renderAll(); }
   function setHistory(arr){ history=arr.slice(); renderAll(); }
 
@@ -2482,7 +2499,8 @@ if(isOutput){
     const sc=text?parseScripture(text):null;
     const cn=(program&&program.conn)||{};
     if(!text){
-      const full=isFullClear(cn.clearRule||"pres", cn.clearLayer||"media", signals);
+      // fallback must match defaultConfig — "pres" cannot tell the two clears apart at all
+      const full=isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
       if(histWantsClear()){ history.length=0; stage.setHistory(history); }   // list clears on any clear (Clear Slide or Clear All)
       stage.setHeaderHold(!full);                              // keep the header on a Clear Slide; hide it on a Clear All
       stage.setLive(null); return;
@@ -2622,13 +2640,18 @@ if(!isOutput){
     pgStage.setLive(liveData); setTally({el:$("pgTitle")}, !!liveData);
     if(liveMode){ pvStage.setLive(liveData); setTally(pvMonTally,!!liveData); }
     if(sc&&sc.ref)pushLog(sc.ref);                               // log AFTER setLive (clean exclude-live)
-    // On any clear the running list empties; the header stays through a Clear Slide (presentation
-    // still active) and hides on a Clear All (full clear) so nothing floats on air.
-    const _cn=preview.conn||{};
+    // On any clear the running list empties; the header stays through a Clear Slide and hides
+    // on a Clear All (full clear) so nothing floats on air. On PP 21.2 the discriminator is
+    // the MEDIA layer, not presentation/active — see migrateClearRule.
+    // Each monitor evaluates the rule from the config it is actually mirroring: the Program
+    // monitor must agree with what OBS is doing, so an un-taken rule change in Preview no
+    // longer makes the Program monitor disagree with air.
+    const _pgcn=(program&&program.conn)||{}, _pvcn=(preview&&preview.conn)||{};
     if(!text){
-      const _full=isFullClear(_cn.clearRule||"pres",_cn.clearLayer||"media",signals);
+      const _pgFull=isFullClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
+      const _pvFull=isFullClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
       if(historyWantsClear(program)) clearLog();
-      pgStage.setHeaderHold(!_full); pvStage.setHeaderHold(!_full);
+      pgStage.setHeaderHold(!_pgFull); pvStage.setHeaderHold(!_pvFull);
     } else { pgStage.setHeaderHold(true); pvStage.setHeaderHold(true); }
     $("stSlide")&&($("stSlide").textContent=text?(text.length>42?text.slice(0,42)+"\u2026":text):"(clear)");
     $("stLayer")&&($("stLayer").textContent=active===null?"n/a (text mode)":active?"slide ON":"slide CLEAR");
@@ -3067,7 +3090,10 @@ if(!isOutput){
 
   function layoutLive(d){ const r=pvStage.getRenderer(d.id); if(r)r.applyLayout(d); savePreview(); }
   function quickPos(d,where){ const L=d.layout;
-    if(where==="lower"){L.x=120;L.y=820;L.w=Math.max(L.w,1100);L.h=Math.max(L.h,160);}
+    if(where==="lower"){L.x=120;L.w=Math.max(L.w,1100);L.h=Math.max(L.h,160);
+      // clamp so a tall element (the stock scripture is now h:280) cannot be pushed off the
+      // bottom of the 1080 stage; keeps the same 80px margin the default geometry uses
+      L.y=Math.min(820,STAGE_H-80-L.h);}
     else if(where==="bl"){L.x=120;L.y=1080-L.h-100;}
     else if(where==="tl"){L.x=120;L.y=80;}
     else if(where==="center"){L.x=Math.round((STAGE_W-L.w)/2);L.y=Math.round((STAGE_H-L.h)/2);}

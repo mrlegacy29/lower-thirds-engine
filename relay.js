@@ -22,6 +22,15 @@ const fs   = require("fs");
 const path = require("path");
 const url  = require("url");
 
+// Headers for the two routes that serve the app itself (/ and /output). frame-ancestors
+// 'none' + X-Frame-Options DENY stop any other page on the machine from framing the
+// operator console, which carries a one-click TAKE.
+const HTML_HEADERS = {
+  "Content-Type": "text/html; charset=utf-8",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "frame-ancestors 'none'"
+};
+
 // Pick the app HTML file. In the desktop app, main.js passes an absolute path.
 // Standalone, prefer lt.html, fall back to the deploy-bundle filename.
 function defaultHtmlFile() {
@@ -125,11 +134,17 @@ function createServer(htmlFile) {
     if (req.method === "OPTIONS") { cors(res, req); res.writeHead(204); return res.end(); }
 
     if (req.method === "GET" && (p === "/" || p === "/index.html")) {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      // Deny framing. The console carries a one-click TAKE, so any page open on the stream
+      // PC could otherwise iframe it invisibly and clickjack a graphic on air. lt.html uses
+      // no iframes of its own, so this costs nothing.
+      res.writeHead(200, HTML_HEADERS);
       return res.end(readHtml());
     }
     if (req.method === "GET" && (p === "/output" || p === "/output/")) {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      // Deny framing. The console carries a one-click TAKE, so any page open on the stream
+      // PC could otherwise iframe it invisibly and clickjack a graphic on air. lt.html uses
+      // no iframes of its own, so this costs nothing.
+      res.writeHead(200, HTML_HEADERS);
       return res.end(readHtml());
     }
     if (p === "/config" && req.method === "GET") {
