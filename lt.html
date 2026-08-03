@@ -513,6 +513,14 @@ function createElement(type){
     content:{}, style:{}, source:{kind:"manual"} };
   if(type==="scripture"){
     base.name="Scripture";
+    // Measured on a real 1920x1080 OBS browser source (2026-08-03): the old default
+    // (the shared 120,820,1100,180 box) could not fit its own content. The body ships
+    // maxLines:3 = 3 x 46px x 1.22 = 168px, plus the reference line (~38px) and
+    // boxDefaults padY 28 top+bottom (56px) = ~270px needed. At h:180 only ONE line of
+    // the verse was ever visible — a live John 1:3 was cut off mid-sentence on air.
+    // Height now fits the 3 lines it promises; y drops so the bottom edge stays at
+    // 1000 (the same 80px lower-third margin as before).
+    base.layout={x:120,y:720,w:1100,h:280};
     base.source={kind:"live", requireRef:true};
     base.content={ref:"John 3:16",translation:"KJV",
       body:"For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life."};
@@ -540,7 +548,10 @@ function createElement(type){
     base.showHeading=true;
     base.box=boxDefaults({style:"glass",padX:40,padY:30});
   } else if(type==="history"){
-    base.name="Scripture reference list"; base.layout={x:120,y:560,w:620,h:380};
+    // Sits ABOVE the scripture lower third with a 20px gap. The old default (y:560,
+    // h:380 = 560..940) overlapped the scripture box by 120px in the stock two-element
+    // config, so the oldest chips rendered underneath the verse panel.
+    base.name="Scripture reference list"; base.layout={x:120,y:340,w:620,h:360};
     base.source={kind:"history"};
     base.content={heading:"Previously Referenced",max:5,order:"new"};
     base.style={ heading:styleDefaults({font:"'Oswald',sans-serif",size:24,weight:"600",color:"#c9a24b",letter:3,upper:true}),
@@ -549,7 +560,8 @@ function createElement(type){
     base.chipBg="#0b1220cc"; base.accentColor="#c9a24b";
     base.histAnim="slide-up"; base.histDur=450; base.excludeLive=false; base.clearOnAll=true;
   } else if(type==="eventList"){
-    base.name="Event list"; base.layout={x:120,y:560,w:620,h:380};
+    // twin of the reference list — same reason it clears the scripture box
+    base.name="Event list"; base.layout={x:120,y:340,w:620,h:360};
     base.source={kind:"manual"};
     base.content={heading:"Service Order",items:"Welcome\nWorship\nMessage\nResponse",max:8,order:"old"};
     base.style={ heading:styleDefaults({font:"'Oswald',sans-serif",size:24,weight:"600",color:"#c9a24b",letter:3,upper:true}),

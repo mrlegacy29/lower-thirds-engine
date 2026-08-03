@@ -73,6 +73,32 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
   pushSSE({ _take: 11 }); await sleep(80);
   ok('partial SSE config does not throw on-air', errors.length === errBefore2);
 
+  /* ---------- the stock look must be usable out of the box (measured in OBS) ----------
+     Caught on a real 1920x1080 OBS browser source, 2026-08-03. jsdom does no text layout
+     (clientHeight/scrollHeight are always 0), so these are arithmetic guards on the
+     declared geometry rather than rendered measurements. */
+  {
+    const cfg = W.defaultConfig();
+    const scr = cfg.elements.find(e => e.type === 'scripture');
+    const his = cfg.elements.find(e => e.type === 'history');
+
+    // The body ships maxLines:3. The box must be tall enough for the reference line,
+    // that many body lines, and boxDefaults padY top+bottom — otherwise the element
+    // silently truncates its own verse. The old default (h:180) fit ONE line.
+    const bs = scr.style.body, rs = scr.style.ref;
+    const need = (bs.maxLines * bs.size * bs.lh) + (rs.size * rs.lh) + (scr.box.padY * 2);
+    ok('scripture box fits the ' + bs.maxLines + ' lines it promises (need ' +
+       Math.ceil(need) + 'px, has ' + scr.layout.h + ')', scr.layout.h >= need);
+
+    // ...and stays inside the 1080 stage.
+    ok('scripture sits on-stage', scr.layout.y + scr.layout.h <= 1080);
+
+    // The two stock elements must not sit on top of each other.
+    const ov = Math.min(scr.layout.y + scr.layout.h, his.layout.y + his.layout.h) -
+               Math.max(scr.layout.y, his.layout.y);
+    ok('stock scripture + reference list do not overlap (overlap ' + Math.max(0, ov) + 'px)', ov <= 0);
+  }
+
   console.log('OUTPUT RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('**FAIL** THREW: ' + e.message); console.log('OUTPUT RESULT  pass=' + pass + '  fail=' + (fail + 1) + '  ERRORS=THREW'); process.exit(1); });
