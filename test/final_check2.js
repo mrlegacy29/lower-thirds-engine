@@ -43,13 +43,16 @@ function fireControls(){
   let allok=true;
   console.log('per-element control sweep (every input/select/toggle/seg + quick-pos/test-anim):');
   for(const t of TYPES){
-    const row=rowByType(t); if(!row){console.log('   **MISSING** '+t);allok=false;continue;}
+    // NOTE: the token must be exactly "**FAIL**" — run-all.js greps for /\*\*FAIL\*\*/ and
+    // this suite exits 0 unconditionally, so anything else (it used to print "**MISSING**"
+    // and "**FAIL(n)**") is invisible to the runner and the suite reports green.
+    const row=rowByType(t); if(!row){console.log('   **FAIL**  MISSING element type: '+t);allok=false;continue;}
     const before=errors.length;
     click(row.querySelector('.nm'));   // select -> builds inspector (renderPanels)
     fireControls();                    // applyPreview does NOT rebuild, so DOM stays valid
     await sleep(10);
     const ok=errors.length===before;
-    console.log('   '+(ok?'PASS':'**FAIL('+(errors.length-before)+')**')+'  '+t);
+    console.log('   '+(ok?'PASS':'**FAIL**')+'  '+t+(ok?'':'  ('+(errors.length-before)+' console errors)'));
     if(!ok)allok=false;
   }
 
@@ -110,5 +113,7 @@ function fireControls(){
   console.log((errors.length===t0?'PASS':'**FAIL**')+'  transition + revert');
 
   console.log('TOTAL ERRORS: '+(errors.length?JSON.stringify([...new Set(errors)].slice(0,6)):'NONE'));
-  process.exit(0);
+  // allok used to be assigned and never read, with an unconditional exit(0) — so a missing
+  // element type or a control raising console errors could not fail the run by any route.
+  process.exit((allok && errors.length===0) ? 0 : 1);
 })().catch(e=>{console.log('THREW:',e.message);process.exit(1);});

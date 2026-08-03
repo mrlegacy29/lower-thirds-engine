@@ -115,10 +115,20 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
     ok('migration: a stored "pres" flips to "all" and stamps _ruleMig2',
        stored.conn.clearRule === 'all' && stored.conn._ruleMig2 === true);
 
-    // (c) an explicit operator pick sets _ruleMig and must survive
-    const chosen = { conn: { clearRule: 'pres', _ruleMig: true } };
-    M(chosen);
-    ok('migration: a DELIBERATE "pres" pick is preserved', chosen.conn.clearRule === 'pres');
+    // (b2) THE CASE THE FIRST ATTEMPT MISSED. The v1.0.4 migration stamped _ruleMig=true on
+    // its OWN auto-flip, so on any install predating v1.0.4 that flag means "auto-flipped",
+    // not "operator chose". Guarding on !_ruleMig skipped exactly these installs and left
+    // them on the broken rule forever. They must be rescued.
+    const upgraded = { conn: { clearRule: 'pres', _ruleMig: true } };
+    M(upgraded);
+    ok('migration: a pre-1.0.4 auto-flipped config (_ruleMig) IS rescued',
+       upgraded.conn.clearRule === 'all' && upgraded.conn._ruleMig2 === true);
+
+    // (c) a pick made AFTER this migration carries _ruleMig2 and must survive forever
+    const chosen = { conn: { clearRule: 'pres', _ruleMig: true, _ruleMig2: true } };
+    M(chosen); M(chosen);
+    ok('migration: a "pres" pick made after the migration is preserved',
+       chosen.conn.clearRule === 'pres');
 
     // (d) idempotent — repeated loads must not thrash the value
     const twice = { conn: { clearRule: 'pres' } };
@@ -136,6 +146,29 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
     let threw = false;
     try { M(null); M(undefined); M({}); M({ conn: null }); } catch (e) { threw = true; }
     ok('migration: a malformed config does not throw', !threw);
+  }
+
+  /* -------- the segmented control must stamp _ruleMig2, or (c) above is a lie --------
+     The "pick is preserved" contract only holds if picking actually sets the flag the
+     migration checks. Verified end-to-end through the real DOM and localStorage rather
+     than by reading the source. */
+  {
+    const seg = [...D.querySelectorAll('button')].find(b => /Presentation cleared/i.test(b.textContent));
+    ok('clear-rule segmented control is present', !!seg);
+    if (seg) {
+      click(seg); await sleep(150);
+      let saved = null;
+      try { saved = JSON.parse(W.localStorage.getItem('pplt.preview.v2')); } catch (e) {}
+      ok('picking "Presentation cleared" persists clearRule=pres',
+         !!saved && saved.conn && saved.conn.clearRule === 'pres');
+      ok('...and stamps _ruleMig2 so the migration will not undo it',
+         !!saved && saved.conn && saved.conn._ruleMig2 === true);
+      // the pick must now survive a reload
+      if (saved) {
+        W.migrateClearRule(saved);
+        ok('...and it survives the next load', saved.conn.clearRule === 'pres');
+      }
+    }
   }
 
   console.log('CLEAR-RULE RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));

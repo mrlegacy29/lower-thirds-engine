@@ -32,10 +32,15 @@ for (const s of suites) {
     const line = out.split('\n').filter(l => /TOTAL ERRORS|RESULT|ERRORS:/.test(l)).pop() || 'ok';
     // Older suites call process.exit(0) unconditionally, so a non-zero exit isn't enough —
     // also treat any "**FAIL**" line in the output as a failure so nothing hides.
-    if (/\*\*FAIL\*\*/.test(out)) {
+    // SECOND NET: a suite can also report trouble as "TOTAL ERRORS: [...]" or "ERRORS=THREW".
+    // That line was previously printed verbatim as the suite's *result* without checking
+    // whether it said NONE, so a suite could announce its own errors and still count green.
+    const errsNotNone = /ERRORS[:=]\s*(?!NONE\b|none\b)\S/.test(out);
+    if (/\*\*FAIL\*\*/.test(out) || errsNotNone) {
       failed++;
       const fails = out.split('\n').filter(l => /\*\*FAIL\*\*/.test(l)).slice(0, 3).map(l => l.trim()).join(' | ');
-      console.log('FAILED  ' + fails);
+      // when the trigger was the error line rather than a **FAIL** token, show that instead
+      console.log('FAILED  ' + (fails || line.trim()));
     } else { console.log(line.trim()); }
   } catch (e) {
     failed++;

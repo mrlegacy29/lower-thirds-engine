@@ -1041,10 +1041,22 @@ function defaultConfig(){
      Clear All     false   FALSE   null
 
    `media` is the real discriminator, which is exactly what the "all layers off" rule uses.
-   Default is back to "all". _ruleMig2 flips a config that still carries the bad "pres"
-   default once; an explicit operator pick sets _ruleMig and is never touched. */
+
+   WHY THE GUARD IS _ruleMig2 ALONE: the first attempt here also required !_ruleMig, on the
+   assumption that _ruleMig marks a deliberate operator pick. It does not. The v1.0.4
+   migration set _ruleMig=true on its OWN automatic flip:
+       if(clearRule==="all" && !_ruleMig){ clearRule="pres"; _ruleMig=true; }
+   so on any install that predates v1.0.4, _ruleMig=true means "auto-flipped", and it is
+   byte-identical to an operator pick. Requiring !_ruleMig therefore skipped exactly the
+   population this migration exists to rescue — they would have kept the broken rule forever,
+   because the migration is idempotent and never self-corrects on a later boot.
+
+   Since "pres" is measurably non-functional on PP 21.2 (it cannot distinguish the two
+   clears at all), everyone comes off it once. _ruleMig2 makes that a single event: an
+   operator who re-picks "pres" afterwards keeps it permanently, because the segmented
+   control stamps _ruleMig2 too (see the clearRule row in the connection panel). */
 function migrateClearRule(cfg){
-  if(cfg&&cfg.conn&&cfg.conn.clearRule==="pres"&&!cfg.conn._ruleMig&&!cfg.conn._ruleMig2){
+  if(cfg&&cfg.conn&&cfg.conn.clearRule==="pres"&&!cfg.conn._ruleMig2){
     cfg.conn.clearRule="all"; cfg.conn._ruleMig2=true;
   }
   return cfg;
@@ -3199,7 +3211,9 @@ if(!isOutput){
         el("p",{class:"hint",html:"The list clears whenever you clear the slide. The <b>header</b> stays through <b>Clear Slide (F2)</b> but disappears on <b>Clear All</b>. Pick how the app detects a full Clear All, and watch the live signals as you test."}),
         rowSeg("Detect a full Clear All by",cn.clearRule||"all",
           [["pres","Presentation cleared"],["all","All layers off"],["layer","A layer turns off"],["manual","Never (manual only)"]],
-          (v)=>{cn.clearRule=v;cn._ruleMig=true;savePreview();renderPanels();}),
+          // _ruleMig2 as well as _ruleMig: without it, an operator who picks "pres" here
+          // would have it migrated straight back to "all" on the next load.
+          (v)=>{cn.clearRule=v;cn._ruleMig=true;cn._ruleMig2=true;savePreview();renderPanels();}),
         (cn.clearRule==="layer")?rowSelect("\u2026this layer turns off",cn.clearLayer||"media",
           [["media","Media"],["props","Props"],["messages","Messages"],["announcements","Announcements"],["video_input","Video input"],["audio","Audio"]],
           (v)=>{cn.clearLayer=v;savePreview();}):null,

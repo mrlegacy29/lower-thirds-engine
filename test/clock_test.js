@@ -17,6 +17,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const errors = [];
 let sseInst = null, slideText = '';
+// Mutable ProPresenter timer payload, served to the app's real poll path so the pptimer
+// mirror can be exercised end to end (fetch -> createPP -> onTimers -> setTimers -> render)
+// rather than by poking an internal handle.
+let timersPayload = [];
 const dom = new JSDOM(html, {
   url: 'http://localhost:7777/output', runScripts: 'dangerously', pretendToBeVisual: true,
   beforeParse(w) {
@@ -24,7 +28,13 @@ const dom = new JSDOM(html, {
     w.EventSource = class { constructor() { sseInst = this; setTimeout(() => this.onopen && this.onopen(), 5); } close() {} };
     w.requestAnimationFrame = (c) => setTimeout(c, 0); w.confirm = () => true; w.alert = () => {};
     w.Element.prototype.animate = function () { return { cancel() {}, finished: Promise.resolve() }; };
-    w.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    w.fetch = (u) => {
+      let url = String(u); try { url = decodeURIComponent(url); } catch (e) {}
+      if (/timers/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve(timersPayload) });
+      if (/layers/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ slide: true, media: true }) });
+      if (/slide/.test(url))  return Promise.resolve({ ok: true, json: () => Promise.resolve({ current: { text: slideText } }) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    };
     w.console.error = (...a) => errors.push(a.join(' ')); w.onerror = (m) => errors.push(String(m));
   }
 });
@@ -34,6 +44,12 @@ const push = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ da
 let take = 500;
 const clockEl = (content) => { const e = W.createElement('clock'); e.content = Object.assign({}, e.content, content); return e; };
 const put = (els) => { const c = W.defaultConfig(); c.elements = els; c._take = ++take; push(c); };
+// same, but with a ProPresenter host configured so the app actually starts polling
+const putLive = (els) => {
+  const c = W.defaultConfig();
+  c.conn.host = '127.0.0.1'; c.conn.port = 1025; c.conn.pollMs = 60;
+  c.elements = els; c._take = ++take; push(c);
+};
 
 (async () => {
   await sleep(300);
@@ -100,14 +116,39 @@ const put = (els) => { const c = W.defaultConfig(); c.elements = els; c._take = 
     ok('countdown renders its label', /STARTS IN/.test(out()));
   }
 
-  /* ------------------------- the PP timer mirror, end to end ---------------------- */
+  /* ------------- the PP timer mirror, END TO END through the real poll -------------
+     This section used to read W.__outStage — a handle that does not exist ANYWHERE in
+     the app. `!stage || ...` therefore short-circuited to true, and the payload block
+     below took an else branch of hard-coded trues. Proven worthless by mutation: with
+     stage.setTimers() gutted so the mirror rendered nothing at all, the suite still
+     reported 43/43 green. It now drives the real chain instead:
+         fetch -> createPP -> onTimers -> stage.setTimers -> name match -> render
+     with payloads copied verbatim off ProPresenter 21.2. */
   {
-    const el = clockEl({ mode: 'pptimer', timerName: 'Sermon', fmt: 'h:mm' });
-    put([el]);
-    await sleep(250);
-    // stage.setTimers() is what the poller calls when the timer endpoint answers
-    const stage = W.__outStage || null;
-    ok('output stage exposes setTimers for the poller', !stage || typeof stage.setTimers === 'function');
+    timersPayload = [
+      { id: { name: 'Segment Countdown', index: 0, uuid: 'a' }, time: '00:00:00', state: 'stopped' },
+      { id: { name: 'PreShow Countdown', index: 1, uuid: 'b' }, time: '05:00:00', state: 'stopped' },
+      { id: { name: 'Game Timer',        index: 2, uuid: 'c' }, time: '00:14:57', state: 'running' }
+    ];
+    putLive([clockEl({ mode: 'pptimer', timerName: 'Game Timer', fmt: 'h:mm' })]);
+    await sleep(900);
+    ok('mirrors the named timer live value (14:57)', /14:57/.test(out()));
+    ok('does not pick up a different timer', !/5:00:00/.test(out()));
+
+    // it must FOLLOW the timer, not latch the first value it ever saw
+    timersPayload = [{ id: { name: 'Game Timer', index: 2, uuid: 'c' }, time: '00:14:45', state: 'running' }];
+    await sleep(800);
+    ok('follows the timer as it counts down (14:45)', /14:45/.test(out()));
+
+    // A stopped timer reading zero must show 0:00 — NOT its configured duration. This is
+    // exactly what shipped broken in v1.3.1: it polled /v1/timers (definitions) and showed
+    // 5:00 for a timer ProPresenter was reporting at 0:00.
+    timersPayload = [{ id: { name: 'Segment Countdown', index: 0, uuid: 'a' }, time: '00:00:00', state: 'stopped' }];
+    putLive([clockEl({ mode: 'pptimer', timerName: 'Segment Countdown', fmt: 'h:mm', hideAtZero: false, zeroText: '0:00' })]);
+    await sleep(900);
+    const zero = out();
+    ok('a stopped timer at zero shows 0:00', /0:00/.test(zero));
+    ok('...and NOT the 5:00 configured duration', !/5:00/.test(zero));
   }
 
   /* ----------- it must poll the LIVE endpoint, not the timer DEFINITIONS ---------- */
@@ -123,28 +164,6 @@ const put = (els) => { const c = W.defaultConfig(); c.elements = els; c._take = 
     ok('polls /v1/timers/current', /ppGet\(\s*["'`]\/v1\/timers\/current["'`]/.test(html));
     ok('does not poll the bare /v1/timers definitions endpoint',
        !/ppGet\(\s*["'`]\/v1\/timers["'`]/.test(html));
-  }
-
-  /* --------- a real /v1/timers/current payload renders the running value ---------- */
-  {
-    const el = clockEl({ mode: 'pptimer', timerName: 'Game Timer', fmt: 'h:mm' });
-    put([el]);
-    await sleep(250);
-    const stage = W.__outStage || null;
-    if (stage && typeof stage.setTimers === 'function') {
-      // copied verbatim off the wire from ProPresenter 21.2
-      stage.setTimers([
-        { id: { name: 'Segment Countdown', index: 0, uuid: 'a' }, time: '00:00:00', state: 'stopped' },
-        { id: { name: 'PreShow Countdown', index: 1, uuid: 'b' }, time: '05:00:00', state: 'stopped' },
-        { id: { name: 'Game Timer',        index: 2, uuid: 'c' }, time: '00:14:57', state: 'running' }
-      ]);
-      await sleep(250);
-      ok('mirrors the named timer live value', /14:57/.test(out()));
-      ok('does not pick up a different timer value', !/5:00:00/.test(out()));
-    } else {
-      ok('mirrors the named timer live value (no stage)', true);
-      ok('does not pick up a different timer value (no stage)', true);
-    }
   }
 
   /* ------------------------- hide-at-zero takes it off air ------------------------ */
