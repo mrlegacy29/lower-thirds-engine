@@ -67,7 +67,12 @@ let pass=0,fail=0; const ok=(n,c)=>{console.log((c?'PASS':'**FAIL**')+'  '+n);c?
   /* ---- TAKE sends preview to program ---- */
   const before=W.localStorage.getItem('pplt.program.v2');
   click(D.getElementById('btnTrans')); await sleep(20);
-  ok('TAKE updates program (persisted)', W.localStorage.getItem('pplt.program.v2')!==before || pvCount>0);
+  // `|| pvCount>0` used to be here, but pvCount>0 is ASSERTED TRUE five lines above, so the
+  // whole condition was unconditionally true. This is the only assertion in the repo covering
+  // TAKE persistence — and if the program is never written to localStorage, an OBS browser
+  // source that reloads after a TAKE boots to the PREVIOUS look (lt.html reads LS_PROGRAM at
+  // startup). That is lost-graphics-on-air, so it has to be able to fail.
+  ok('TAKE updates program (persisted)', W.localStorage.getItem('pplt.program.v2')!==before);
   ok('no errors loading/taking a look', errors.length===b0);
 
   /* ---- Blank tile clears the screen ---- */

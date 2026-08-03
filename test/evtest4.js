@@ -49,4 +49,13 @@ function run(){
   out.forEach(([n,ok])=>console.log((ok?'PASS':'**FAIL**')+'  '+n));
   console.log('ERRORS: '+(errors.length?JSON.stringify(errors.slice(0,6)):'none'));
 }
-setTimeout(()=>{ try{run();}catch(e){console.log('TEST THREW:',e.message);} process.exit(0); },600);
+// A throw here used to print "TEST THREW:" and exit 0. That string matches neither
+// run-all's /\*\*FAIL\*\*/ detector nor its result-line filter, so one missing DOM node
+// silently converted this suite from 10 assertions to 0 while npm test printed "evtest4 ok".
+// Emit the **FAIL** token AND exit non-zero so it cannot hide by either route.
+setTimeout(()=>{
+  let code=0;
+  try{ run(); }
+  catch(e){ console.log('**FAIL**  TEST THREW: '+((e&&e.message)||e)); code=1; }
+  process.exit(code);
+},600);

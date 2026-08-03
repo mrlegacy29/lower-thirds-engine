@@ -1062,6 +1062,34 @@ function migrateClearRule(cfg){
   return cfg;
 }
 
+/* The v1.3.3 geometry fix (scripture could only ever show ONE line of its own verse, and the
+   stock scripture + reference list overlapped by 120px) changed createElement's defaults —
+   which only affects elements created AFTERWARDS. Every machine that has already run the app
+   has a stored config, so without this the headline fix of that release reached nobody who
+   was already using it, including the rig the bug was measured on.
+
+   Deliberately conservative: an element is rewritten ONLY if its layout is byte-identical to
+   the retired factory default, which means the operator never touched it. Any custom size or
+   position — even one number off — is left completely alone. Runs once (_layoutMig). */
+const RETIRED_LAYOUTS={
+  scripture:{was:{x:120,y:820,w:1100,h:180}, now:{x:120,y:720,w:1100,h:280}},
+  history:  {was:{x:120,y:560,w:620, h:380}, now:{x:120,y:340,w:620, h:360}},
+  eventList:{was:{x:120,y:560,w:620, h:380}, now:{x:120,y:340,w:620, h:360}}
+};
+function migrateLayout(cfg){
+  if(!cfg||cfg._layoutMig) return cfg;
+  const els=Array.isArray(cfg.elements)?cfg.elements:[];
+  els.forEach(el=>{
+    const m=el&&RETIRED_LAYOUTS[el.type], L=el&&el.layout;
+    if(!m||!L) return;
+    if(L.x===m.was.x&&L.y===m.was.y&&L.w===m.was.w&&L.h===m.was.h){
+      el.layout=Object.assign({},L,m.now);
+    }
+  });
+  cfg._layoutMig=true;
+  return cfg;
+}
+
 const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Sermon title",
   bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media",
   clock:"Timer / clock",qr:"QR code"};
@@ -2431,7 +2459,7 @@ if(isOutput){
   function readHashCfg(){ const m=(location.hash||"").match(/[#&]cfg=([^&]+)/); if(!m)return null;
     try{ return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(m[1]))))); }catch(e){ return null; } }
   const hashCfg=readHashCfg();
-  let program = migrateClearRule(hashCfg ? deepMerge(defaultConfig(),hashCfg) : lsGet(LS_PROGRAM,defaultConfig()));
+  let program = migrateLayout(migrateClearRule(hashCfg ? deepMerge(defaultConfig(),hashCfg) : lsGet(LS_PROGRAM,defaultConfig())));
   applyBg(document.body,program.out.bg); stage.setConfig(program);
   let lastTake=program._take||0, lastClearHist=program._clearHist||0;
 
@@ -2494,8 +2522,8 @@ if(isOutput){
 
 /* ============================================================= CONSOLE BOOTSTRAP */
 if(!isOutput){
-  let preview=migrateClearRule(lsGet(LS_PREVIEW,defaultConfig()));
-  let program=migrateClearRule(lsGet(LS_PROGRAM, clone(preview)));
+  let preview=migrateLayout(migrateClearRule(lsGet(LS_PREVIEW,defaultConfig())));
+  let program=migrateLayout(migrateClearRule(lsGet(LS_PROGRAM, clone(preview))));
   lsSet(LS_PREVIEW,preview); lsSet(LS_PROGRAM,program);   // persist the one-time clear-rule migration
   let presets=loadPresets();
   let selectedId=preview.elements.length?preview.elements[0].id:null;

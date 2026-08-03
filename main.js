@@ -122,6 +122,16 @@ function safeCheckForUpdates() {
   try {
     const p = autoUpdater.checkForUpdates();
     if (p && typeof p.catch === "function") {
+      // The CHECK promise is covered below, but autoDownload is on, so a successful check
+      // hands back a SECOND promise for the 102 MB background download — and that one was
+      // unhandled. A dropped church network or a full disk mid-download then surfaces as
+      // Electron's modal "A JavaScript error occurred in the main process" over the
+      // operator console. Swallowing is correct here: the "error" event listener already
+      // turns the same failure into updateState = { status: "error" } for the banner.
+      p.then((r) => {
+        const dp = r && r.downloadPromise;
+        if (dp && typeof dp.catch === "function") dp.catch(() => {});
+      }).catch(() => {});
       p.catch((e) => { updateState = { status: "error", message: String((e && e.message) || e), quiet: !manualCheck }; pushUpdateState(); });
     }
   } catch (e) {

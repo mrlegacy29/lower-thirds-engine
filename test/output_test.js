@@ -99,6 +99,53 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
     ok('stock scripture + reference list do not overlap (overlap ' + Math.max(0, ov) + 'px)', ov <= 0);
   }
 
+  /* ------- the geometry fix has to REACH an install that already exists -------
+     Changing createElement's defaults only affects elements created afterwards, so
+     without migrateLayout the v1.3.3 fix helped nobody who was already running the app.
+     The fixture below is Brandon's real stored config, read out of the running app. */
+  {
+    const ML = W.migrateLayout;
+    ok('migrateLayout: reachable', typeof ML === 'function');
+
+    const stored = { elements: [
+      { type: 'scripture', layout: { x: 120, y: 820, w: 1100, h: 180 } },
+      { type: 'history',   layout: { x: 120, y: 560, w: 620,  h: 380 } }
+    ] };
+    ML(stored);
+    const s = stored.elements[0].layout, h = stored.elements[1].layout;
+    ok('migrateLayout: an untouched stock scripture is rescued (h 180 -> 280)',
+       s.y === 720 && s.h === 280);
+    ok('migrateLayout: an untouched stock ref list moves clear of it',
+       h.y === 340 && h.h === 360);
+    ok('migrateLayout: the two no longer overlap',
+       Math.min(s.y + s.h, h.y + h.h) - Math.max(s.y, h.y) <= 0);
+    ok('migrateLayout: stamps _layoutMig', stored._layoutMig === true);
+
+    // THE IMPORTANT ONE: an operator's own numbers must never be touched. One value
+    // differing from the retired default is enough to mean "they moved it".
+    const custom = { elements: [
+      { type: 'scripture', layout: { x: 120, y: 820, w: 1100, h: 181 } },   // h nudged
+      { type: 'history',   layout: { x: 200, y: 560, w: 620,  h: 380 } }    // x moved
+    ] };
+    ML(custom);
+    ok('migrateLayout: a customised scripture is left ALONE',
+       custom.elements[0].layout.h === 181 && custom.elements[0].layout.y === 820);
+    ok('migrateLayout: a customised ref list is left ALONE',
+       custom.elements[1].layout.x === 200 && custom.elements[1].layout.y === 560);
+
+    // runs once — a config already migrated is never rewritten again
+    const again = { _layoutMig: true, elements: [
+      { type: 'scripture', layout: { x: 120, y: 820, w: 1100, h: 180 } } ] };
+    ML(again);
+    ok('migrateLayout: does not re-run on an already-migrated config',
+       again.elements[0].layout.h === 180);
+
+    let threw = false;
+    try { ML(null); ML(undefined); ML({}); ML({ elements: null }); ML({ elements: [null, {}] }); }
+    catch (e) { threw = true; }
+    ok('migrateLayout: a malformed config does not throw', !threw);
+  }
+
   console.log('OUTPUT RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('**FAIL** THREW: ' + e.message); console.log('OUTPUT RESULT  pass=' + pass + '  fail=' + (fail + 1) + '  ERRORS=THREW'); process.exit(1); });
