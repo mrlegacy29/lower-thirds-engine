@@ -2494,6 +2494,9 @@ if(isOutput){
   let lastTake=program._take||0, lastClearHist=program._clearHist||0;
 
   const history=[]; let histId=0;
+  // Has the reference list actually had anything in it since the last FULL clear? headerHold
+  // only makes sense once something has been referenced — see onSlide below.
+  let everShown=false;
   function histWantsClear(){ return (program&&program.elements||[]).some(e=>e&&e.type==="history"&&e.clearOnAll!==false); }
   function onSlide(text,active,clearAll,signals){
     const sc=text?parseScripture(text):null;
@@ -2502,10 +2505,16 @@ if(isOutput){
       // fallback must match defaultConfig — "pres" cannot tell the two clears apart at all
       const full=isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
       if(histWantsClear()){ history.length=0; stage.setHistory(history); }   // list clears on any clear (Clear Slide or Clear All)
-      stage.setHeaderHold(!full);                              // keep the header on a Clear Slide; hide it on a Clear All
+      if(full) everShown=false;                                // a full clear ends the session
+      stage.setHeaderHold(everShown && !full);                 // hold the header on a Clear Slide, hide it on a Clear All
       stage.setLive(null); return;
     }
-    stage.setHeaderHold(true);
+    // A live slide must NOT raise the header on its own. This used to be an unconditional
+    // setHeaderHold(true), so ANY text on air — a worship-song lyric, a sermon point, an
+    // announcement — put an empty "Previously Referenced" plate on air and left it there for
+    // the whole set. Only an actual scripture reference opens the list.
+    if(sc&&sc.ref) everShown=true;
+    stage.setHeaderHold(everShown);
     if(sc){ stage.setLive(sc); if(sc.ref)pushHist(sc.ref); }    // set live first, then log (clean exclude-live)
     else { stage.setLive({ref:"",body:text.trim(),translation:"",rawText:text.trim()}); } // non-scripture slide
   }
@@ -2602,6 +2611,8 @@ if(!isOutput){
   // (or the manual "Add test verse" button). Sample-verse buttons and preview edits
   // never touch it, so nothing from preview leaks into the live/program list.
   let liveLog=[], logId=0;
+  // console-side twin of the output page's everShown — see the header rule in the poll below
+  let logEverShown=false;
   function pushLog(ref){ if(!ref)return; const last=liveLog[liveLog.length-1]; if(last&&last.ref===ref)return;
     liveLog.push({id:++logId,ref}); pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
   function clearLog(){ liveLog.length=0; pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
@@ -2651,8 +2662,15 @@ if(!isOutput){
       const _pgFull=isFullClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
       const _pvFull=isFullClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
       if(historyWantsClear(program)) clearLog();
-      pgStage.setHeaderHold(!_pgFull); pvStage.setHeaderHold(!_pvFull);
-    } else { pgStage.setHeaderHold(true); pvStage.setHeaderHold(true); }
+      if(_pgFull&&_pvFull) logEverShown=false;                 // a full clear ends the session
+      pgStage.setHeaderHold(logEverShown&&!_pgFull); pvStage.setHeaderHold(logEverShown&&!_pvFull);
+    } else {
+      // Same rule as the output page (onSlide): live text alone must not raise the header,
+      // or an empty list plate rides on air through every song. Both render paths must agree
+      // or the console monitors stop matching what OBS is showing.
+      if(sc&&sc.ref) logEverShown=true;
+      pgStage.setHeaderHold(logEverShown); pvStage.setHeaderHold(logEverShown);
+    }
     $("stSlide")&&($("stSlide").textContent=text?(text.length>42?text.slice(0,42)+"\u2026":text):"(clear)");
     $("stLayer")&&($("stLayer").textContent=active===null?"n/a (text mode)":active?"slide ON":"slide CLEAR");
     const on=(active===null)?!!text:!!active;

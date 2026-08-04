@@ -68,6 +68,40 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
   ok('F1: output ref list clears', outList().length === 0);
   ok('F1: output header HIDES (presentation cleared)', !outHeadingShown());
 
+  /* ---------- a NON-scripture slide must not raise an empty header ----------
+     Reported from a live rig: booting into a worship set put a bare "Prev Scriptures"
+     plate on air with nothing under it, and it stayed there through every song.
+     onSlide() used to call setHeaderHold(true) unconditionally for ANY live text, so a
+     song lyric, a sermon point or an announcement opened the list header even though no
+     scripture had ever been referenced. The header belongs to the LIST — only a real
+     reference opens it, and only a Clear Slide holds it open. */
+  {
+    // fresh session: nothing referenced yet, a song lyric goes live
+    slideText = 'Children of generations\nOf every nation of Kingdom come';
+    slideActive = true; presActive = true; layersObj = { slide: true, media: true };
+    await sleep(450);
+    ok('song lyric on air does NOT raise the empty ref-list header', !outHeadingShown());
+    ok('...and the list stays empty', outList().length === 0);
+
+    // a real verse opens it
+    slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; await sleep(450);
+    ok('a real reference opens the header', outHeadingShown());
+    ok('...and lists the reference', outList().includes('Psalm 23:1'));
+
+    // back to a song — the list has content, so it legitimately stays up
+    slideText = 'Children of generations\nOf every nation of Kingdom come'; await sleep(450);
+    ok('after a verse, a song slide keeps the populated list up', outHeadingShown());
+
+    // Clear All ends the session; a later song must not bring the bare header back
+    slideText = ''; slideActive = false; presActive = false;
+    layersObj = { slide: false, media: false }; await sleep(700);
+    ok('Clear All hides the header again', !outHeadingShown());
+    slideText = 'Of every nation of Kingdom come';
+    slideActive = true; presActive = true; layersObj = { slide: true, media: true };
+    await sleep(450);
+    ok('a song after Clear All does NOT resurrect the empty header', !outHeadingShown());
+  }
+
   // a partial/garbage broadcast must not throw on-air (deepMerge guard)
   const errBefore2 = errors.length;
   pushSSE({ _take: 11 }); await sleep(80);
