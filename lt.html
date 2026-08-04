@@ -115,6 +115,10 @@
   .transition svg{opacity:.95}
   .transition.flashok{background:linear-gradient(180deg,#34d36a,#1fae53);
     box-shadow:0 6px 20px rgba(48,209,88,.5),inset 0 1px 0 rgba(255,255,255,.3)}
+  /* the TAKE was refused — held longer than the success flash, because it means OBS is
+     still showing the previous look */
+  .transition.flashfail{background:linear-gradient(180deg,#ff5b52,#c62b22);
+    box-shadow:0 6px 20px rgba(255,59,48,.55),inset 0 1px 0 rgba(255,255,255,.25)}
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
     padding:9px 13px;border:1px solid var(--line);background:var(--panel2);
     border-radius:8px;font-size:13px;font-weight:600;white-space:nowrap}
@@ -298,6 +302,10 @@
   .ops-air.live .ops-airdot{background:var(--live);box-shadow:0 0 12px rgba(255,59,48,.9);animation:airpulse 1.6s infinite}
   @keyframes airpulse{0%,100%{opacity:1}50%{opacity:.35}}
   .ops-clock{font-variant-numeric:tabular-nums;color:var(--muted);font-size:13px}
+  /* TAKE failure, shown in every skin. Loud on purpose: it means what OBS is showing is
+     NOT what the operator just sent. */
+  .ops-take{padding:6px 12px;border-radius:8px;font-size:12.5px;font-weight:700;
+    background:rgba(255,59,48,.16);border:1px solid var(--live);color:#ff6a61}
 
   .oplooks{padding:8px 20px 14px}
   .ol-head{display:flex;align-items:baseline;gap:12px;margin:0 0 10px}
@@ -367,9 +375,17 @@
 
   <main class="main">
     <div class="opstatus" id="opStatus">
-      <div class="ops-cell"><span class="ops-dot" id="opConnDot"></span><span id="opConnTxt">Connecting\u2026</span></div>
-      <div class="ops-cell"><span class="ops-k">Slide</span><span class="ops-v" id="opSlideTxt">\u2014</span></div>
+      <!-- \u2026 and \u2014 are JAVASCRIPT escapes, not HTML ones. Written in markup they
+           render literally as "Connecting\u2026". Use the real characters/entities. -->
+      <div class="ops-cell"><span class="ops-dot" id="opConnDot"></span><span id="opConnTxt">Connecting&hellip;</span></div>
+      <div class="ops-cell"><span class="ops-k">Slide</span><span class="ops-v" id="opSlideTxt">&mdash;</span></div>
       <div class="ops-cell ops-air" id="opAir"><span class="ops-airdot"></span><span id="opAirTxt">STANDBY</span></div>
+      <!-- A refused TAKE needs a surface HERE. #relayPill/#relayTxt live in .side and
+           #relDot in .topbar, both display:none under #console-root.op \u2014 so in Showcaller
+           and Simple, the skins a service is actually run from, a failed TAKE had no signal
+           on screen at all while the button still flashed green. .opstatus is inside .main,
+           so it survives every skin. -->
+      <div class="ops-cell ops-take" id="opTake" style="display:none"></div>
       <div class="ops-cell ops-clock" id="opClock">--:--</div>
     </div>
     <div class="topbar">
@@ -2575,10 +2591,29 @@ if(!isOutput){
   const pgStage=createStage(pgScaler,{interactive:false});
 
   const bus=createBus();
-  bus.onStatus((ok)=>{ $("relayPill").classList.toggle("on",ok);
+  // (ok,msg) \u2014 publish() computes a specific failure string ("over 5 MB", "not reachable",
+  // "answered N"). The old one-arg signature threw all of that away, so the three authored
+  // messages were dead in EVERY view. It also only wrote to #relayPill/#relayTxt/#relDot,
+  // which are display:none in the operator skins.
+  let _takePending=false;
+  bus.onStatus((ok,msg)=>{ $("relayPill").classList.toggle("on",ok);
     const rd=$("relDot"); if(rd)rd.classList.toggle("on",ok);
     $("relayTxt").textContent=ok?("Relay connected \u2014 OBS auto-syncs ("+relayBase()+")"):
-      (SERVED?"Relay: not responding":"Relay: standalone (file mode)"); });
+      (SERVED?(msg||"Relay: not responding"):"Relay: standalone (file mode)");
+    const cell=$("opTake");
+    if(cell){                                    // visible in every skin
+      if(ok){ cell.style.display="none"; cell.textContent=""; }
+      else { cell.textContent=msg||"Relay not responding \u2014 OBS may be showing the previous look";
+             cell.style.display=""; }
+    }
+    // Only a TAKE gets the green flash, and only once we know it landed. It used to fire
+    // unconditionally the moment the button was pressed, so a refused publish still read
+    // "ON AIR" while OBS showed the previous look.
+    if(_takePending){ _takePending=false;
+      if(ok) flashTrans(); else { const b=$("btnTrans"); if(b){ b.classList.remove("flashok"); b.classList.add("flashfail");
+        setTimeout(()=>b.classList.remove("flashfail"),2500); } }
+    }
+  });
   // console also subscribes so program monitor follows external takes
   bus.subscribe((cfg)=>{ program=deepMerge(defaultConfig(),cfg||{}); applyBg(pgMon,program.out.bg); pgStage.setConfig(program); pgStage.setHistory(liveLog); });
   // seed the relay/localStorage with the current program so a freshly-opened
@@ -2722,7 +2757,10 @@ if(!isOutput){
     if(JSON.stringify(program.conn)!==_ppConnSig) startConsolePP();   // keep the console poller on the host we just published
     applyBg(pgMon,program.out.bg); pgStage.setConfig(program); pgStage.setHistory(liveLog);
     pgStage.replayVisible();                 // re-play entrances so animation changes are visible on Program
-    refreshURL(); flashTrans(); updateTakeState(); };
+    // flashTrans() used to run here, unconditionally — the operator saw success before the
+    // publish had even resolved. The onStatus handler now flashes green on a confirmed send
+    // and red on a refusal.
+    _takePending=true; refreshURL(); updateTakeState(); };
   $("btnRevert").onclick=()=>{ preview=clone(program); delete preview._take; savePreview(); selectedId=preview.elements[0]?preview.elements[0].id:null;
     applyPreview(); renderPanels(); updateTakeState(); };
   function flashTrans(){ const b=$("btnTrans"); b.classList.add("flashok"); setTimeout(()=>b.classList.remove("flashok"),700); }

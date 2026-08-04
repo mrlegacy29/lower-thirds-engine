@@ -2,7 +2,11 @@
 node_modules/
 
 # build output (installers, unpacked app)
-/release/   # electron-builder output — anchored, or it also swallows vendor/**/Release/
+# Anchored with a leading slash: a bare `release/` also matches
+# vendor/macadam/build/Release/ and silently drops the native binary from the commit.
+# git has NO inline comments — a trailing "# ..." on this line becomes part of the
+# pattern, which is exactly how it stopped ignoring anything at all.
+/release/
 dist/
 
 # logs

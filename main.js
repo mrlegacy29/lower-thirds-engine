@@ -295,11 +295,19 @@ function visibleWindowCount() {
     try { return !w.isDestroyed() && !w.webContents.isOffscreen(); } catch (e) { return true; }
   }).length;
 }
-app.on("browser-window-closed", () => {
-  if (process.platform === "darwin") return;
-  // defer: the window is still in getAllWindows() during this event
-  setImmediate(() => {
-    if (visibleWindowCount() === 0) { try { if (sdi) sdi.stop(); } catch (e) {} app.quit(); }
+// app has NO "browser-window-closed" event — it declares only browser-window-created,
+// -focus and -blur (grep electron.d.ts: zero hits for -closed). Bound to a name that is
+// never emitted, this net never fired: closing the console while SDI held an OFFSCREEN
+// window left the process running with no visible window — invisible, not closable from
+// any UI, and the single-instance lock then refused every relaunch until it was killed
+// from Task Manager. Bind the per-window "closed" event, which does exist.
+app.on("browser-window-created", (_e, win) => {
+  win.on("closed", () => {
+    if (process.platform === "darwin") return;
+    // defer: the window is still in getAllWindows() while this fires
+    setImmediate(() => {
+      if (visibleWindowCount() === 0) { try { if (sdi) sdi.stop(); } catch (e) {} app.quit(); }
+    });
   });
 });
 app.on("activate", () => { if (visibleWindowCount() === 0) createWindow(); });
