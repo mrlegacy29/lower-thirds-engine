@@ -1024,6 +1024,7 @@ function qrSvg(text,opts){
    Returns { elementId: true|false } — an override map consulted by activeBase(). */
 function evalRules(rules,ctx){
   const out={};
+  const acc={};                 // target -> what its rules collectively decided
   ctx=ctx||{};
   if(ctx.cleared) return out;                 // cleared -> no rule holds anything on air
   const text=String(ctx.text||""), ref=String(ctx.ref||"");
@@ -1035,7 +1036,23 @@ function evalRules(rules,ctx){
     else if(r.match==="regex"){ try{ hit=new RegExp(String(r.pattern||""),"i").test(hay); }catch(e){ hit=false; } }
     else { const p=String(r.pattern||""); hit=p!=="" && hay.toLowerCase().indexOf(p.toLowerCase())>=0; }
     const wantShow=(r.act!=="hide");
-    out[r.target]=hit?wantShow:!wantShow;
+    // ACCUMULATE per target. This used to assign out[r.target] outright, so with two rules
+    // on the same element the later one silently voided the earlier — a rule that matched
+    // could be overruled by one that did not, and the first rule became completely inert.
+    const a=acc[r.target]||(acc[r.target]={mShow:false,mHide:false,hasShow:false,hasHide:false});
+    if(wantShow) a.hasShow=true; else a.hasHide=true;
+    if(hit){ if(wantShow) a.mShow=true; else a.mHide=true; }
+  });
+  Object.keys(acc).forEach(id=>{
+    const a=acc[id];
+    if(a.mHide) out[id]=false;              // a matched HIDE wins: off air is the safe way to be wrong
+    else if(a.mShow) out[id]=true;          // otherwise a matched SHOW carries it
+    else if(a.hasShow) out[id]=false;       // a show-rule holds its target off until it matches
+    else out[id]=true;                      // only hide-rules, none matched -> released
+    // That last line is the documented contract ("while the slide matches ___, HIDE ___" —
+    // otherwise it shows), and theme_rules_test pins it. It is safe to force `true` here
+    // only because activeBase() now requires contentFor(d)!==null before a rule may put
+    // something on air; without that guard this is what pinned an empty plate.
   });
   return out;
 }
@@ -2362,7 +2379,13 @@ function createStage(scaler,opts){
     if(!d || d.visible===false) return false;
     // A rule takes precedence over the element's own visibility mode, but NOT over
     // the operator's eye toggle above — hiding something by hand must always win.
-    if(ruleState && Object.prototype.hasOwnProperty.call(ruleState,d.id)) return !!ruleState[d.id];
+    if(ruleState && Object.prototype.hasOwnProperty.call(ruleState,d.id)){
+      // HIDE is unconditional — taking something off air is always the safe direction.
+      // SHOW must still have something to say: forcing an element on when contentFor()
+      // returns null pinned a styled but EMPTY plate on the OBS output and left it there.
+      // This is the same lesson already recorded for vis==="always" two lines below.
+      return ruleState[d.id] ? (contentFor(d)!==null) : false;
+    }
     // "Always on screen" must not override an element that explicitly asked to hide.
     // A clock with "hide at zero" returns null from contentFor; forcing it visible
     // anyway painted a styled but EMPTY plate on air and left it there.

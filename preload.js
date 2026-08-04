@@ -126,7 +126,10 @@ function render(s) {
     setTimeout(hide, 3500);
   } else if (s.status === "error") {
     if (s.quiet) { hide(); return; }   // background (launch/periodic) check — don't nag during a service
-    bannerEl.dataset.key = "err"; if (dismissed === "err") return;
+    // hide() before returning, matching the two branches above. A bare `return` left the
+    // banner VISIBLE carrying whatever the previous status wrote — typically "Update ready"
+    // — with the Install button already stripped off by the reset at the top of render().
+    bannerEl.dataset.key = "err"; if (dismissed === "err") { hide(); return; }
     bannerEl.classList.add("err");
     textEl.innerHTML = "<b>Update check failed.</b> Will retry shortly.";
     show();

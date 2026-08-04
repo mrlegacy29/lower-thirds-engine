@@ -130,6 +130,20 @@ let take = 900;
     ok('act=hide: match -> hidden', R(hide, { text: 'Offering time', cleared: false }).E1 === false);
     ok('act=hide: no match -> shown', R(hide, { text: 'Anything else', cleared: false }).E1 === true);
 
+    /* ---- TWO rules on the SAME element ----
+       evalRules assigned out[target] outright, so the LAST rule silently voided every
+       earlier one: a rule that MATCHED could be overruled by one that did not, and the
+       first rule became completely inert. Accumulated per target now. */
+    const mk = (o) => Object.assign({ enabled: true, target: 'E1', on: 'text', match: 'contains', act: 'show' }, o);
+    ok('two show-rules: the FIRST matching is enough',
+       R([mk({ id: 'a', pattern: 'John' }), mk({ id: 'b', pattern: 'zzz' })], { text: 'John 3:16', cleared: false }).E1 === true);
+    ok('two show-rules: the SECOND matching is enough',
+       R([mk({ id: 'a', pattern: 'zzz' }), mk({ id: 'b', pattern: 'John' })], { text: 'John 3:16', cleared: false }).E1 === true);
+    ok('a matched HIDE beats a matched SHOW (off air is the safe way to be wrong)',
+       R([mk({ id: 'a', pattern: 'John' }), mk({ id: 'b', pattern: 'John', act: 'hide' })], { text: 'John 3:16', cleared: false }).E1 === false);
+    ok('two hide-rules, neither matching -> still released',
+       R([mk({ id: 'a', pattern: 'x', act: 'hide' }), mk({ id: 'b', pattern: 'y', act: 'hide' })], { text: 'John 3:16', cleared: false }).E1 === true);
+
     ok('CLEAR releases every target (nothing pinned on air)',
        Object.keys(R(show, { text: 'Welcome', cleared: true })).length === 0);
 
