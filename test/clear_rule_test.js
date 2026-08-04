@@ -77,6 +77,13 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   ok('F2: list CLEARS', pgList().length === 0);
   ok('F2: header STAYS up (media still on -> not a full clear)', pgHeadingShown());
 
+  // THE BARE-PLATE STATE: chips gone, header still up. This is what sits on air through a
+  // worship set after an F2, and "Clear scripture list now" is the only control offered to
+  // remove it — so it has to actually remove it. Asserting this AFTER a full clear (where
+  // the header is already down) passes whether or not the button works.
+  click(btnByText(/Clear scripture list now/i)); await sleep(700);
+  ok('manual Clear list drops a bare header left up by F2', !pgHeadingShown());
+
   // re-populate, then F1 (Clear All): presentation cleared
   slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = Object.assign({}, VERSE); await sleep(400);
   ok('list repopulates after a new verse', pgList().includes('Psalm 23:1'));
@@ -95,6 +102,9 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   ok('auto-clear OFF: list persists through a clear', pgList().includes('Isaiah 40:31'));
   click(btnByText(/Clear scripture list now/i)); await sleep(700);
   ok('manual Clear list empties the list', pgList().length === 0);
+  // (the header assertion for this button lives up at the F2 bare-plate state, where the
+  // header is actually UP — here a full clear has already lowered it, so it would pass
+  // whether or not the button did anything)
 
   /* ---------------- the one-time clearRule migration (was untested) ----------------
      migrateClearRule() rewrites a saved setting on EVERY load, for every existing

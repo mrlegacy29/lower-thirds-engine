@@ -2575,7 +2575,7 @@ if(isOutput){
     const nextSrc=JSON.stringify((merged.data&&merged.data.sources)||[]);
     if(nextSrc!==lastDataSrc){ lastDataSrc=nextSrc; dataFeed.setSources((merged.data&&merged.data.sources)||[]); }
     if(connChanged){ pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
-    if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; stage.setHistory(history); }  // manual "Clear list" from the console
+    if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }  // manual "Clear list": drop the HEADER too, or a bare plate is left on air
     if(merged._take && merged._take!==lastTake){ lastTake=merged._take; stage.replayVisible(); }
   });
   // storage event (same browser, other tab)
@@ -2589,7 +2589,7 @@ if(isOutput){
     { const sig=JSON.stringify((program.data&&program.data.sources)||[]);
       if(sig!==lastDataSrc){ lastDataSrc=sig; dataFeed.setSources((program.data&&program.data.sources)||[]); } }
     if(cc){pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);}
-    if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; stage.setHistory(history); }
+    if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }
     if(c._take && c._take!==lastTake){ lastTake=c._take; stage.replayVisible(); } }catch(err){} } });
 
   const ro=new ResizeObserver(()=>fitScaler(scaler,rootStage)); ro.observe(rootStage); fitScaler(scaler,rootStage);
@@ -2681,10 +2681,18 @@ if(!isOutput){
   let logEverShown=false;
   function pushLog(ref){ if(!ref)return; const last=liveLog[liveLog.length-1]; if(last&&last.ref===ref)return;
     liveLog.push({id:++logId,ref}); pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
+  // NOTE: this runs on EVERY clear, including a Clear SLIDE — so it must NOT touch
+  // logEverShown. Resetting it here dropped the header on F2, which is the one case the
+  // header is supposed to survive. The manual "Clear list now" does that instead.
   function clearLog(){ liveLog.length=0; pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
   // manual "Clear list now" — clears the console log AND tells the OBS output to clear (nonce on the published config)
   let _clearNonce=0;
-  function manualClearList(){ clearLog(); _clearNonce=Math.max(Date.now(),_clearNonce+1); const c=clone(program); c._clearHist=_clearNonce; bus.publish(c); }
+  // The operator asked for the list to GO, so the header goes with it. clearLog() alone
+  // left a bare "Previously Referenced" plate on the monitors (and on air) with nothing
+  // under it, and this button was the only control offered to remove it.
+  function manualClearList(){ clearLog();
+    logEverShown=false; pvStage.setHeaderHold(false); pgStage.setHeaderHold(false);
+    _clearNonce=Math.max(Date.now(),_clearNonce+1); const c=clone(program); c._clearHist=_clearNonce; bus.publish(c); }
   // live readout of the clear-detection signals (layer states + presentation status) for the Clear Behavior panel
   let _lastSignals=null;
   function renderClearDiag(s){ if(s)_lastSignals=s; const box=$("clearDiag"); if(!box||!_lastSignals)return;
@@ -3840,6 +3848,11 @@ if(!isOutput){
     });
   }
   function loadPreset(p){ const keepConn=clone(preview.conn); preview=deepMerge(defaultConfig(),Object.assign({},p.config,{conn:keepConn}));
+    // A saved look carries whatever geometry it was saved with. Without this, loading a
+    // preset (or importing a .json) restored the RETIRED v1.3.1 layout — the 120px
+    // scripture/ref-list overlap and the box that fits one line of a verse — silently
+    // undoing migrateLayout every time. Boot migrates (2527/2600-2601); this path did not.
+    migrateLayout(migrateClearRule(preview));
     // ensure element ids exist
     (preview.elements||[]).forEach(e=>{ if(!e.id)e.id=uid(); });
     selectedId=preview.elements[0]?preview.elements[0].id:null; applyPreview(); renderPanels(); }
@@ -3897,6 +3910,9 @@ if(!isOutput){
           if(!confirm("Replace the current preview with the imported look?\n\nYour presets are untouched, and this only affects Preview until you press TAKE."))return;
           const keepConn=clone(preview.conn||{});
           preview=r.payload.config; preview.conn=keepConn;
+          // same reason as loadPreset(): an imported .json carries the geometry it was saved
+          // with, and would otherwise restore the retired overlapping/clipping layout
+          migrateLayout(migrateClearRule(preview));
           selectedId=preview.elements[0]?preview.elements[0].id:null;
           savePreview(); applyPreview(); renderPanels();
         } else if(r.kind==="library"){
