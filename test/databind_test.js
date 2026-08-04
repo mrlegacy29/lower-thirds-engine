@@ -56,6 +56,31 @@ setTimeout(async () => {
   // the decision: unknown/empty stays visible rather than silently blanking
   ok('applyVars: an UNKNOWN placeholder is left verbatim', W.applyVars('{{nope}}', V) === '{{nope}}');
 
+  // A bound source is somebody's SPREADSHEET, so a column is legitimately "Offering (total)"
+  // or "attendance%". The matcher was [\w.\- ] only, so those keys were parsed, listed under
+  // "Available placeholders", and could never match — pasting one put permanent braces on air.
+  {
+    const S = { 'Offering (total)': '$12,450', 'attendance%': '92', 'a/b': 'slash' };
+    ok('applyVars: a name with spaces and parentheses resolves',
+       W.applyVars('{{Offering (total)}}', S) === '$12,450');
+    ok('applyVars: a name with a percent sign resolves', W.applyVars('{{attendance%}}', S) === '92');
+    ok('applyVars: a name with a slash resolves', W.applyVars('{{a/b}}', S) === 'slash');
+    // ...and widening the class must NOT reopen the prototype hole the guard closes.
+    ok('applyVars: {{constructor}} is still left verbatim',
+       W.applyVars('{{constructor}}', S) === '{{constructor}}');
+    ok('applyVars: {{toString}} is still left verbatim',
+       W.applyVars('{{toString}}', S) === '{{toString}}');
+  }
+
+  // "Sheet layout" now offers an explicit auto; the parser must still auto-decide when unset
+  ok('csv auto: two columns are read as name,value',
+     JSON.stringify(W.parseDataSource('csv', 'offering,$12450', null, undefined)) === '{"offering":"$12450"}');
+  ok('csv auto: three columns are read as a header row',
+     JSON.stringify(W.parseDataSource('csv', 'a,b,c\n1,2,3', null, undefined)) === '{"a":"1","b":"2","c":"3"}');
+  // (an explicit "pairs" override is already asserted further down; not repeated here —
+  //  and comparing JSON.stringify would have depended on key ORDER, which JS decides by
+  //  putting integer-like keys first)
+
   // The reference-list / event-list heading was the ONE operator-typed field that read
   // d.content.heading raw, so a bound placeholder went to air as literal braces. Pinned at
   // the call site: CUR_VARS is overwritten by the stage from the live feed on every render

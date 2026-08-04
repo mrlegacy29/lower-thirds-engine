@@ -75,8 +75,16 @@ let take = 900;
        !!refNode && refNode.style.color === 'rgb(255, 0, 0)');
     ok('token render: @ink resolved onto the verse body',
        !!bodyNode && bodyNode.style.color === 'rgb(0, 0, 255)');
-    ok('token render: no raw "@" leaked into the DOM style',
-       !!refNode && refNode.style.color.indexOf('@') < 0);
+    // Checking style.color for "@" CANNOT fail: jsdom's CSS parser rejects "@accent" as an
+    // invalid colour and leaves the property empty, so the raw token is never observable
+    // there whatever the code does. Check the resolver's OUTPUT, which is the only place a
+    // leak is actually visible.
+    ok('token resolver never returns a raw @token',
+       W.tok('@accent').indexOf('@') < 0 && W.tok('@ink').indexOf('@') < 0 &&
+       W.tok('@display').indexOf('@') < 0);
+    ok('token resolver passes literals straight through', W.tok('#ff8800') === '#ff8800');
+    ok('token resolver leaves an UNKNOWN token alone rather than blanking it',
+       W.tok('@nosuchtoken') === '@nosuchtoken');
   }
 
   /* -------- changing ONLY the theme restyles without touching the element -------- */

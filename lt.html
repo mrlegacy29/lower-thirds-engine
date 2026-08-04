@@ -681,7 +681,11 @@ function tok(v){ return resolveTok(v,CUR_THEME); }
    ugly on purpose: silence would look intentional and could go unnoticed. */
 function applyVars(s,vars){
   if(typeof s!=="string"||s.indexOf("{{")<0)return s;
-  return s.replace(/\{\{\s*([\w.\- ]+?)\s*\}\}/g,(m,k)=>{
+  // [^{}] rather than [\w.\- ]: a bound source is somebody's spreadsheet, so a column can
+  // legitimately be "Offering (total)" or "attendance%". Those keys were PARSED and listed
+  // in "Available placeholders", but the narrow class could never match them — pasting one
+  // put permanent braces on air. The hasOwnProperty guard below is what keeps this safe.
+  return s.replace(/\{\{\s*([^{}]+?)\s*\}\}/g,(m,k)=>{
     // hasOwnProperty, not a plain lookup: {{constructor}} or {{toString}} would
     // otherwise resolve against Object.prototype and paint "function Object() {...}"
     // on air instead of staying verbatim.
@@ -2548,6 +2552,14 @@ function createStage(scaler,opts){
   startClockTick();
   return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,select,setScale,replayVisible,
     hasClock, stopClockTick,
+    // Is an automation rule currently holding this element? null = no rule has an opinion.
+    // The Layers panel needs this to stop claiming "Visible" for something a rule is
+    // holding off air, and to explain why its eye toggle appears to do nothing.
+    ruleOwns:(id)=>(ruleState&&Object.prototype.hasOwnProperty.call(ruleState,id))?!!ruleState[id]:null,
+    // What this element would currently paint. testAnim needs it: passing {} played the
+    // entrance on an EMPTY box for every type it did not special-case (a Timer/clock most
+    // visibly, since its text is computed here rather than stored on the element).
+    contentFor:(d)=>{ try{ return contentFor(d); }catch(e){ return null; } },
     get cfg(){return cfg;}, getRenderer:(id)=>renderers.get(id) };
 }
 
@@ -2854,7 +2866,11 @@ if(!isOutput){
     // and red on a refusal.
     _takePending=true; refreshURL(); updateTakeState(); };
   $("btnRevert").onclick=()=>{ preview=clone(program); delete preview._take; savePreview(); selectedId=preview.elements[0]?preview.elements[0].id:null;
-    applyPreview(); renderPanels(); updateTakeState(); };
+    // Revert copies PROGRAM back over Preview, so whatever look tile was highlighted is no
+    // longer what is loaded. Clear it rather than leave the grid pointing at a look the
+    // operator is no longer editing.
+    currentLookId=null;
+    applyPreview(); renderPanels(); updateTakeState(); if(viewMode!=="builder")renderOpLooks(); };
   function flashTrans(){ const b=$("btnTrans"); b.classList.add("flashok"); setTimeout(()=>b.classList.remove("flashok"),700); }
   // Idempotent and cancel-safe. Capturing textContent on EVERY call meant a second click
   // while a flash was still showing captured the FLASH TEXT as the "original", so the
@@ -2956,8 +2972,20 @@ if(!isOutput){
     preview.elements.forEach((d,idx)=>{
       if(!d)return;
       const row=el("div",{class:"elrow"+(d.id===selectedId?" sel":"")});
-      const eye=iconBtn(d.visible?"eye":"eyeoff", d.visible?"Visible — click to hide":"Hidden — click to show",
-        (e)=>{e.stopPropagation();d.visible=!d.visible;applyPreview();renderPanels();}, d.visible?"on":"");
+      // A rule can be holding this element off air, in which case the eye toggle looks
+      // inert — the operator clicks it and nothing changes on the monitors — while the
+      // tooltip cheerfully says "Visible". Say who is actually in control. The operator's
+      // eye still outranks a rule for HIDING (activeBase checks d.visible first), so only
+      // the rule-holds-it-OFF case is misleading.
+      const owned=(typeof pvStage.ruleOwns==="function")?pvStage.ruleOwns(d.id):null;
+      const heldOff=(owned===false);
+      const eyeTitle=d.visible
+        ? (heldOff?"An automation rule is holding this off air — click to hide it as well"
+                  :"Visible — click to hide")
+        : "Hidden — click to show";
+      const eye=iconBtn(d.visible?(heldOff?"eyeoff":"eye"):"eyeoff", eyeTitle,
+        (e)=>{e.stopPropagation();d.visible=!d.visible;applyPreview();renderPanels();},
+        (d.visible&&!heldOff)?"on":"");
       const nm=el("div",{class:"nm",title:"Select",onclick:()=>{selectedId=d.id;pvStage.select(d.id);renderPanels();},
         // d.type is escaped too: it arrives from imported files and broadcast configs,
         // so an unescaped interpolation here was an HTML-injection sink.
@@ -2987,7 +3015,10 @@ if(!isOutput){
     return el("div",null,[el("label",{class:"fld",text:label}),el("div",{class:"row"},[inp,out])]);
   }
   function rowColor(label,val,onCh){
-    const c=el("input",{type:"color",value:toHex(val)}); const t=el("input",{type:"text",value:val});
+    // For a brand token the swatch must show the RESOLVED colour, or it reports something
+    // that is not on air. The text field keeps the token itself, so the operator can still
+    // see (and edit) that it is themed rather than a literal.
+    const c=el("input",{type:"color",value:toHex(tok(val))}); const t=el("input",{type:"text",value:val});
     c.oninput=()=>{t.value=c.value;onCh(c.value);};
     t.oninput=()=>{ if(/^#?[0-9a-fA-F]{6,8}$/.test(t.value)){const v=t.value[0]==="#"?t.value:"#"+t.value;c.value=v.slice(0,7);onCh(v);} };
     return el("div",null,[el("label",{class:"fld",text:label}),el("div",{class:"cw"},[c,t])]);
@@ -2997,6 +3028,12 @@ if(!isOutput){
   function rowArea(label,val,onCh){ const t=el("textarea",{},val||""); t.value=val||"";
     t.oninput=()=>onCh(t.value); return el("div",null,[el("label",{class:"fld",text:label}),t]); }
   function rowSelect(label,val,opts,onCh){ const s=el("select");
+    // A brand token ("@display") matches no option, so the select fell back to showing the
+    // FIRST one — after "Apply theme to all elements" the Font dropdown reported a literal
+    // font that was not what was on air. Represent the token instead of misreporting.
+    const matches=opts.some(o=>String(Array.isArray(o)?o[0]:o)===String(val));
+    if(!matches&&val!=null&&String(val).charAt(0)==="@")
+      s.append(el("option",{value:String(val),text:"Brand theme ("+val+")",selected:true}));
     opts.forEach(o=>{const v=Array.isArray(o)?o[0]:o,l=Array.isArray(o)?o[1]:o; const op=el("option",{value:v,text:l}); if(String(v)===String(val))op.selected=true; s.append(op);});
     s.onchange=()=>onCh(s.value); return el("div",null,[el("label",{class:"fld",text:label}),s]); }
   function rowToggle(label,val,onCh){ const i=el("input",{type:"checkbox"}); i.checked=!!val;
@@ -3293,7 +3330,11 @@ if(!isOutput){
     setTimeout(()=>{ let c;
       if(d.type==="history") c={items:liveLog};
       else if(d.type==="eventList"){ const lines=(d.content.items||"").split("\n").map(s=>s.trim()).filter(Boolean); c={items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
-      else if(d.source&&d.source.kind==="live") c=SAMPLE1; else c={};
+      else if(d.source&&d.source.kind==="live") c=SAMPLE1;
+      // {} played the entrance on an EMPTY box for every other type. A Timer/clock is the
+      // obvious one — its text is computed in contentFor(), not stored on the element — so
+      // "Test animation" flew a blank plate in and out.
+      else c=(typeof pvStage.contentFor==="function"?pvStage.contentFor(d):null)||{};
       // Stamp the PREVIEW's theme first. This repaints outside renderAll(), so it
       // otherwise resolved brand tokens against whichever stage rendered last — a
       // test animation could flash in Program's colours.
@@ -3517,6 +3558,16 @@ if(!isOutput){
     _cslDataSig=sig; cslDataFeed.setSources(dataOf().sources);
   }
   function paintDataStatus(vars,st){
+    // Per-source ✓/✕ lines FIRST, and unconditionally — this runs on every emit, including
+    // the one a failed "Refresh now" produces. It used to be computed here and painted
+    // nowhere, so a broken source reported nothing and the button looked completely inert.
+    const sts=st||{};
+    Object.keys(sts).forEach(id=>{
+      const line=document.getElementById("dataSt_"+id); if(!line)return;
+      const s=sts[id]||{};
+      line.textContent=(s.ok?"✓ ":"✕ ")+(s.msg||(s.ok?"OK":"failed"));
+      line.style.color=s.ok?"#8ef0b8":"#ff9d96";
+    });
     const n=$("dataVars"); if(!n)return;
     n.innerHTML="";
     // Show namespaced names too (source.key). Filtering them out hid half the usable
@@ -3531,6 +3582,11 @@ if(!isOutput){
       row.append(key,val); box.append(row);
     });
     n.append(box);
+    // Say so when the list is cut short. It silently stopped at 24, so an operator looking
+    // for a placeholder that exists concluded it did not.
+    if(keys.length>24)
+      n.append(el("p",{class:"hint",style:"color:var(--muted)",
+        text:"Showing the first 24 of "+keys.length+" placeholders. The rest still work — they are just not listed here."}));
     n.append(el("p",{class:"hint",text:"Paste a placeholder into any text field — captions, verses, QR links, bullet lists."}));
   }
   function secData(){
@@ -3553,25 +3609,36 @@ if(!isOutput){
       if((s.kind||"csv")==="json")
         card.append(rowText("Path into the JSON (optional)",s.pick,(v)=>{s.pick=v;savePreview();refreshDataFeed();},"e.g. data.totals"));
       if((s.kind||"csv")==="csv"){
-        card.append(rowSelect("Sheet layout",s.layout||"pairs",
-          [["pairs","Name,value on each row"],["table","Header row, values on row 2"]],
-          (v)=>{s.layout=v;savePreview();refreshDataFeed();}));
+        // "auto" is a REAL state: with s.layout unset the parser decides by width
+        // (2 columns -> pairs, wider -> table). Showing "pairs" as the fallback told the
+        // operator the sheet was being read as name/value while a wide sheet was actually
+        // being read as a header row — garbage placeholder names with no way to tell.
+        card.append(rowSelect("Sheet layout",s.layout||"auto",
+          [["auto","Auto — 2 columns = name,value; wider = header row"],
+           ["pairs","Name,value on each row"],["table","Header row, values on row 2"]],
+          (v)=>{ if(v==="auto") delete s.layout; else s.layout=v;
+                 savePreview();refreshDataFeed();renderPanels(); }));
         card.append(el("p",{class:"hint",html:"A two-column sheet is ambiguous, so pick what matches. <b>Name,value</b>: <i>offering,$12450</i> on each row. <b>Header row</b>: names across the top, values underneath."}));
       }
       card.append(rowRange("Refresh every (seconds)",Math.max(5,Number(s.interval)||60),5,600,5,"s",(v)=>{s.interval=v;savePreview();refreshDataFeed();}));
-      const st=(cslDataFeed.status()||{})[s.id];
-      if(st){
-        const line=el("p",{class:"hint",style:"color:"+(st.ok?"#8ef0b8":"#ff9d96")});
-        line.append(document.createTextNode((st.ok?"✓ ":"✕ ")+st.msg));
-        card.append(line);
-      }
+      // ALWAYS present, with a stable id, so paintDataStatus can repaint it on every emit.
+      // Built conditionally it only ever appeared on a full panel re-render: a source that
+      // failed said nothing at all, and one that recovered kept showing the old error.
+      card.append(el("p",{class:"hint",id:"dataSt_"+s.id}));
       wrap.append(card);
     });
     const actions=el("div",{class:"row",style:"gap:8px;flex-wrap:wrap"},[
       el("button",{class:"btn sm",html:svg("plus")+" Add source",onclick:()=>{
         d.sources.push({id:uid(),enabled:true,name:"",url:"",kind:"csv",interval:60});
         savePreview();renderPanels();}}),
-      el("button",{class:"btn ghost sm",text:"Refresh now",onclick:()=>cslDataFeed.refresh()})
+      // Fire-and-forget gave zero feedback: on a broken source nothing on screen changed at
+      // all, so the button read as dead. The per-source ✓/✕ lines now repaint from the
+      // emit this triggers; flash the button too so the click is visibly acknowledged.
+      el("button",{class:"btn ghost sm",text:"Refresh now",onclick:(e)=>{
+        const b=e&&e.currentTarget;
+        if(!(dataOf().sources||[]).some(s=>s&&s.enabled!==false&&(s.url||"").trim())){
+          flash(b,"No enabled source with a URL"); return; }
+        flash(b,"Refreshing…"); cslDataFeed.refresh(); }})
     ]);
     const vars=el("div",{class:"grp"},[el("div",{class:"gh",text:"Available placeholders"}),el("div",{id:"dataVars"})]);
     setTimeout(()=>paintDataStatus(cslDataFeed.vars(),cslDataFeed.status()),0);
@@ -3600,25 +3667,41 @@ if(!isOutput){
       head.append(lbl,iconBtn("trash","Delete rule",()=>{rules.splice(i,1);applyPreview();renderPanels();},"danger"));
       card.append(head);
 
+      // The plain-English sentence is repainted in place by every control. It was built once
+      // at panel-build time, so four of the five controls changed the rule and left the
+      // summary describing the OLD one. A full renderPanels() is not an option here — the
+      // pattern field calls this from oninput and would destroy the field being typed into.
+      const sum=el("p",{class:"hint"});
+      const paintSummary=()=>{
+        const t=(targets.find(x=>x[0]===r.target)||[])[1];
+        sum.innerHTML="While the "+((r.on==="ref")?"reference":"slide text")+" "+
+          ((r.match==="any")?"is anything":((r.match==="regex")?"matches ":"contains ")+"<b>"+escapeHtml(r.pattern||"…")+"</b>")+
+          ", <b>"+((r.act==="hide")?"hide":"show")+"</b> "+escapeHtml(t||"(pick an element)")+
+          " — and do the opposite when it doesn't.";
+      };
+
       card.append(rowSelect("When the live",r.on||"text",[["text","Slide text"],["ref","Scripture reference"]],
-        (v)=>{r.on=v;applyPreview();}));
+        (v)=>{r.on=v;paintSummary();applyPreview();}));
       card.append(rowSelect("…",r.match||"contains",[["contains","contains"],["regex","matches (regex)"],["any","is anything (always on)"]],
         (v)=>{r.match=v;applyPreview();renderPanels();}));
       if((r.match||"contains")!=="any")
-        card.append(rowText("Pattern",r.pattern,(v)=>{r.pattern=v;applyPreview();},
+        card.append(rowText("Pattern",r.pattern,(v)=>{r.pattern=v;paintSummary();applyPreview();},
           (r.match==="regex")?"e.g. ^Announcements":"e.g. Welcome"));
       card.append(rowSelect("Then",r.act||"show",[["show","SHOW this element"],["hide","HIDE this element"]],
-        (v)=>{r.act=v;applyPreview();}));
-      if(targets.length)
-        card.append(rowSelect("Element",r.target||targets[0][0],targets,(v)=>{r.target=v;applyPreview();}));
-      else
+        (v)=>{r.act=v;paintSummary();applyPreview();}));
+      if(targets.length){
+        // Render an explicit UNSET state instead of falling back to targets[0][0]. After the
+        // target element was deleted, the dropdown displayed a REAL element as selected while
+        // r.target still pointed at the dead id — so the rule controlled nothing, and
+        // re-picking that same element could not arm it (the value never changed).
+        const opts=r.target&&targets.some(x=>x[0]===r.target)?targets:[["","(pick an element)"]].concat(targets);
+        card.append(rowSelect("Element",(r.target&&targets.some(x=>x[0]===r.target))?r.target:"",opts,
+          (v)=>{r.target=v||null;paintSummary();applyPreview();}));
+      } else
         card.append(el("p",{class:"hint",text:"Add an element first — a rule needs something to control."}));
 
-      const t=(targets.find(x=>x[0]===r.target)||[])[1];
-      card.append(el("p",{class:"hint",html:"While the "+( (r.on==="ref")?"reference":"slide text")+" "+
-        ((r.match==="any")?"is anything":((r.match==="regex")?"matches ":"contains ")+"<b>"+escapeHtml(r.pattern||"…")+"</b>")+
-        ", <b>"+((r.act==="hide")?"hide":"show")+"</b> "+escapeHtml(t||"(pick an element)")+
-        " — and do the opposite when it doesn't."}));
+      paintSummary();
+      card.append(sum);
       wrap.append(card);
     });
 
@@ -3973,7 +4056,12 @@ if(!isOutput){
     migrateLayout(migrateClearRule(preview));
     // ensure element ids exist
     (preview.elements||[]).forEach(e=>{ if(!e.id)e.id=uid(); });
-    selectedId=preview.elements[0]?preview.elements[0].id:null; applyPreview(); renderPanels(); }
+    selectedId=preview.elements[0]?preview.elements[0].id:null;
+    // Track the selection HERE, not only in the operator tile handler. Loading a look from
+    // the Builder tree left the Looks grid highlighting whatever was selected before, so
+    // the operator view showed the wrong tile as current.
+    currentLookId=(p&&p.id)||null;
+    applyPreview(); renderPanels(); if(viewMode!=="builder")renderOpLooks(); }
   function flashName(n){ /* no-op visual */ }
   /* ================= GRAPHICS IMPORT / EXPORT =================================
      Portable .json files for moving designs between machines (home <-> stream PC),

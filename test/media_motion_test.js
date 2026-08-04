@@ -22,7 +22,17 @@ const addBtn=(t)=>[...D.querySelectorAll('.addmenu button')].find(b=>b.textConte
 const rowByType=(ty)=>rows().find(r=>r.querySelector('.ty')&&r.querySelector('.ty').textContent===ty);
 const P=()=>D.getElementById('panels');
 const selByOption=(val)=>[...P().querySelectorAll('select')].find(s=>[...s.options].some(o=>o.value===val));
-const setSel=(s,val)=>{ if(!s)return false; s.value=val; s.dispatchEvent(new W.Event('change',{bubbles:true})); return true; };
+// LOUD on a missing control. This returned false silently, and every assertion in this file
+// measures only `errors.length===b` — so a DELETED control raised no console error and the
+// test passed for something that no longer existed. Same for a select with no such option:
+// assigning it leaves s.value unchanged, which is not "it worked".
+const setSel=(s,val)=>{
+  if(!s) throw new Error('control not found when setting "'+val+'"');
+  s.value=val;
+  if(s.value!==val) throw new Error('select has no option "'+val+'" (value stayed "'+s.value+'")');
+  s.dispatchEvent(new W.Event('change',{bubbles:true}));
+  return true;
+};
 const inputByPH=(sub)=>[...P().querySelectorAll('input[type=text]')].find(i=>(i.placeholder||'').includes(sub));
 const btnByText=(re)=>[...P().querySelectorAll('button')].find(b=>re.test(b.textContent));
 let pass=0,fail=0;
