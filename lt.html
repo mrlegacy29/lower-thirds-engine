@@ -2740,7 +2740,13 @@ if(!isOutput){
     if(!canShow) flash($("simName"),names.length?"Set Name source to Live":"Add a Name element");
   };
   $("simClear").onclick=()=>{ pvStage.setLive(null); setTally(pvMonTally,false); };
-  function toggleLive(v){ liveMode=v; $("simLive").classList.toggle("on",v);
+  function toggleLive(v){
+    // With no ProPresenter IP configured, startConsolePP() has nothing to poll — the switch
+    // latched ON, read "Live ProPresenter feed: ON", and nothing ever arrived. Worse in the
+    // operator skins, which have no host field to fix it with. Refuse and say why.
+    if(v && !(preview&&preview.conn&&preview.conn.host)){
+      flash($("simLive"),"Set the ProPresenter IP in Builder first"); return; }
+    liveMode=v; $("simLive").classList.toggle("on",v);
     $("simLive").textContent="Live ProPresenter feed: "+(v?"ON":"OFF");
     if(v){ startConsolePP(); } }
   $("simLive").onclick=()=>toggleLive(!liveMode);
@@ -2811,7 +2817,15 @@ if(!isOutput){
   $("btnRevert").onclick=()=>{ preview=clone(program); delete preview._take; savePreview(); selectedId=preview.elements[0]?preview.elements[0].id:null;
     applyPreview(); renderPanels(); updateTakeState(); };
   function flashTrans(){ const b=$("btnTrans"); b.classList.add("flashok"); setTimeout(()=>b.classList.remove("flashok"),700); }
-  function flash(btn,txt){ const o=btn.textContent; btn.textContent=txt; setTimeout(()=>btn.textContent=o,1300); }
+  // Idempotent and cancel-safe. Capturing textContent on EVERY call meant a second click
+  // while a flash was still showing captured the FLASH TEXT as the "original", so the
+  // button kept that label permanently — "Sample name" got stuck reading "Add a Name
+  // element" for the rest of the session.
+  function flash(btn,txt){ if(!btn)return;
+    if(btn._flashOrig===undefined) btn._flashOrig=btn.textContent;
+    clearTimeout(btn._flashT);
+    btn.textContent=txt;
+    btn._flashT=setTimeout(()=>{ btn.textContent=btn._flashOrig; btn._flashOrig=undefined; },1300); }
   // Pending vs live state on the TAKE button + Program panel.
   // conn is NOT stripped: the OUTPUT page polls ProPresenter using program.conn, so a host/
   // port/poll/clear-rule edit genuinely is un-taken work. Stripping it left the button saying
@@ -3406,7 +3420,11 @@ if(!isOutput){
             rowText("Port",cn.port,(v)=>{cn.port=parseInt(v)||1025;savePreview();},"1025")),
       el("p",{class:"hint",html:"ProPresenter &rarr; <b>Settings &rarr; Network</b> &rarr; enable, copy IP + port."}),
       rowRange("Poll rate (ms)",cn.pollMs,80,1000,20,"ms",(v)=>{cn.pollMs=v;savePreview();}),
-      el("div",{class:"row"},[el("button",{class:"btn primary full",text:"Connect / reconnect",onclick:()=>{startConsolePP();}})]),
+      // With an empty IP this silently tore down a working feed and then had nothing to
+      // connect to, while the status line kept its last value ("ProPresenter connected").
+      el("div",{class:"row"},[el("button",{class:"btn primary full",text:"Connect / reconnect",onclick:(e)=>{
+        if(!(cn.host||"").trim()){ flash(e.currentTarget,"Enter the ProPresenter IP first"); return; }
+        startConsolePP(); }})]),
       el("div",{class:"grp"},[el("div",{class:"gh",text:"Status"}),
         statLine("Status","stStatus","Not connected"),
         statLine("Slide","stSlide","\u2014"),
@@ -3849,9 +3867,19 @@ if(!isOutput){
       if(f._open!==false){ f.items.forEach((p,pi)=>{
         fol.append(el("div",{class:"preset"},[
           el("span",{class:"pn",title:"Load into Preview",text:p.name,onclick:()=>loadPreset(p)}),
-          iconBtn("refresh","Overwrite with current preview",()=>{p.config=snapshotForPreset();savePresets(presets);}),
+          // Destroyed the saved look with no confirmation AND no feedback — the operator
+          // could not tell whether the click had registered, so a second "did that work?"
+          // click was the natural next move.
+          iconBtn("refresh","Overwrite with current preview",(e)=>{
+            if(!confirm('Overwrite "'+p.name+'" with the current preview?\n\nThis replaces the saved look and cannot be undone.'))return;
+            p.config=snapshotForPreset(); savePresets(presets);
+            const b=e&&e.currentTarget; if(b){ b.classList.add("ok"); setTimeout(()=>b.classList.remove("ok"),900); } }),
           iconBtn("pencil","Rename",()=>{askText("Preset name:",p.name,"Rename").then(n=>{if(n){p.name=n;savePresets(presets);renderPanels();}});}),
-          iconBtn("trash","Delete",()=>{f.items.splice(pi,1);savePresets(presets);renderPanels();},"danger")
+          // Deleting a FOLDER two lines up already confirms; deleting a saved look did not,
+          // so one mis-click destroyed it with no undo and no feedback.
+          iconBtn("trash","Delete",()=>{
+            if(!confirm('Delete the saved look "'+p.name+'"?\n\nThis cannot be undone.'))return;
+            f.items.splice(pi,1);savePresets(presets);renderPanels();},"danger")
         ]));
       }); }
       wrap.append(fol);
@@ -3909,6 +3937,12 @@ if(!isOutput){
   /* ---- export ---- */
   function exportLook(){
     const cfg=snapshotForPreset();
+    // parseGfx only accepts a look whose config HAS elements, so exporting an empty preview
+    // wrote a file that Import would always refuse — the operator only found out later, on
+    // the other machine. Refuse at the export door so the two sides agree.
+    if(!cfg.elements||!cfg.elements.length){
+      alert("There is nothing to export — the preview is empty.\n\nAdd at least one element, then Export look again.");
+      return; }
     gfxSave(gfxWrap("look",{name:"Look",config:cfg}),"lt-look-"+safeName(new Date().toISOString().slice(0,10))+".json");
   }
   function exportElement(d){

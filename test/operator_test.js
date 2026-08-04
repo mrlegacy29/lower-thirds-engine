@@ -175,6 +175,10 @@ let pass=0,fail=0; const ok=(n,c)=>{console.log((c?'PASS':'**FAIL**')+'  '+n);c?
     }
   }
 
+  // (the no-host latch and flash()-stickiness checks live in console_controls_test.js —
+  // they need a FRESH boot, and by this point this suite has already added a live Name
+  // element and configured a host, so both would assert against the wrong state)
+
   ok('no runtime errors during operator workflow', errors.length===0);
   console.log('\nOPERATOR RESULT  pass='+pass+'  fail='+fail+'  ERRORS='+(errors.length?errors.slice(0,5).join(' | '):'NONE'));
   process.exit(fail||errors.length?1:0);
