@@ -94,6 +94,87 @@ let pass=0,fail=0; const ok=(n,c)=>{console.log((c?'PASS':'**FAIL**')+'  '+n);c?
   /* ---- clock is ticking ---- */
   ok('clock renders HH:MM:SS', /^\d\d:\d\d:\d\d$/.test(D.getElementById('opClock').textContent||''));
 
+  /* ---------- the Preview-feed sample buttons must actually DO something ----------
+     Reported from the app: "I used the sample names and clear button and it didn't do
+     anything." Both were real:
+       - SAMPLEN carried only body/rawText, but a Name element reads data.name/data.title
+         (nameFor/titleFor), so "Sample name" fed data nothing could render — dead button.
+       - SAMPLE1 was John 3:16, which is ALSO the Scripture element's factory placeholder,
+         so on a fresh look "Sample verse" replaced the text with itself.
+     final_check2 already clicked all five of these, but only asserted nothing THREW —
+     "clicked without an error" is not "did something". These assert the effect. */
+  {
+    const pvTxt = () => [...D.querySelectorAll('#pv-scaler .lt-el')]
+      .filter(e => e.style.opacity !== '0').map(e => e.textContent).join(' ');
+
+    // The Blank tile was loaded above ("Blank tile empties the preview"), so there is
+    // nothing on stage to render into. Put a real look back first, or these assert against
+    // an intentionally empty preview and fail for the wrong reason.
+    click(tileByName('Test Look')); await sleep(60);
+    ok('a look is loaded before the sample-feed checks',
+       D.querySelectorAll('#pv-scaler .lt-el').length > 0);
+
+    click(D.getElementById('simV1')); await sleep(60);
+    ok('Sample verse visibly changes the preview', /Psalm 23:1/.test(pvTxt()));
+    ok('...and is NOT the factory placeholder verse', !/John 3:16/.test(pvTxt()));
+
+    click(D.getElementById('simV2')); await sleep(60);
+    ok('Verse 2 swaps the live verse', /Romans 8:28/.test(pvTxt()));
+
+    click(D.getElementById('simClear')); await sleep(60);
+    ok('Clear removes the live verse', !/Romans 8:28/.test(pvTxt()));
+
+    // No Name element in this look, so the button must say so rather than sit silent.
+    click(D.getElementById('simName')); await sleep(40);
+    ok('Sample name reports when no Name element can show it',
+       /Add a Name element/i.test(D.getElementById('simName').textContent || ''));
+    await sleep(1400);   // let flash() restore the label before later assertions
+
+    // ...and with a Name element present it must actually RENDER the sample. Asserting on
+    // "Pastor Mike Reynolds" would be worthless here — that is the element's own factory
+    // placeholder, so it shows up whether or not the sample data works. SAMPLEN uses a
+    // distinct name precisely so this assertion can tell the difference.
+    // Adding a layer is a BUILDER action — this suite has been driving the operator view,
+    // where the Layers panel is not the surface being rendered. Switch back first, or the
+    // element is added to a preview nothing is showing.
+    const vs = D.getElementById('viewSwitch');
+    const bBtn = vs && [...vs.querySelectorAll('button')].find(b => b.dataset.view === 'builder');
+    if (bBtn) { click(bBtn); await sleep(150); }
+    ok('switched to builder view for the layer test',
+       !D.getElementById('console-root').classList.contains('op'));
+
+    const addName = [...D.querySelectorAll('button')].find(b => /name\s*\/\s*title/i.test(b.textContent));
+    ok('builder offers a Name/title element', !!addName);
+    if (addName) {
+      click(addName); await sleep(150);
+
+      // A new element defaults to source=manual, and a manual element IGNORES live data by
+      // design (manualContent returns its own content). So the button correctly declines
+      // here — assert that, then flip it to Live and assert the sample actually lands.
+      click(D.getElementById('simName')); await sleep(40);
+      ok('Sample name says the Name element is on Manual',
+         /Set Name source to Live/i.test(D.getElementById('simName').textContent || ''));
+      await sleep(1400);
+
+      const liveSeg = [...D.querySelectorAll('button')]
+        .find(b => /^Live\b/i.test((b.textContent || '').trim()) && !/ProPresenter feed/i.test(b.textContent));
+      ok('the Name element has a Live source option', !!liveSeg);
+      if (liveSeg) {
+        click(liveSeg); await sleep(150);
+        click(D.getElementById('simName')); await sleep(150);
+        // Scope to the Name element's OWN nodes. Matching against the whole preview would
+        // also match SAMPLEN.body, which carries the same words — the assertion would then
+        // pass even with name/title stripped, i.e. with the original bug still present.
+        const nm = D.querySelector('#pv-scaler .n-name');
+        const ti = D.querySelector('#pv-scaler .n-title');
+        ok('Sample name renders into the LIVE Name element itself',
+           !!nm && /Dr\. Sarah Whitfield/.test(nm.textContent || ''));
+        ok('...including the role title', !!ti && /Guest Speaker/.test(ti.textContent || ''));
+        await sleep(1400);
+      }
+    }
+  }
+
   ok('no runtime errors during operator workflow', errors.length===0);
   console.log('\nOPERATOR RESULT  pass='+pass+'  fail='+fail+'  ERRORS='+(errors.length?errors.slice(0,5).join(' | '):'NONE'));
   process.exit(fail||errors.length?1:0);

@@ -2604,9 +2604,21 @@ if(!isOutput){
 
   /* ---- preview live/sample feed ---- */
   let liveMode=false;
-  const SAMPLE1={ref:"John 3:16",translation:"KJV",body:"For God so loved the world, that he gave his only begotten Son, that whosoever believeth in him should not perish, but have everlasting life.",rawText:"John 3:16\nFor God so loved the world..."};
+  // Deliberately NOT John 3:16: that is the Scripture element's factory placeholder content,
+  // so on a fresh look this button replaced the text with itself and looked like it did
+  // nothing at all. A different verse makes the click visibly land.
+  const SAMPLE1={ref:"Psalm 23:1",translation:"KJV",body:"The Lord is my shepherd; I shall not want.",rawText:"Psalm 23:1\nThe Lord is my shepherd; I shall not want."};
   const SAMPLE2={ref:"Romans 8:28",translation:"NIV",body:"And we know that in all things God works for the good of those who love him, who have been called according to his purpose.",rawText:"Romans 8:28\nAnd we know..."};
-  const SAMPLEN={ref:"",translation:"",body:"Pastor Mike Reynolds\nLead Pastor",rawText:"Pastor Mike Reynolds\nLead Pastor"};
+  // A live Name element derives its name/title by SPLITTING rawText on newlines — see the
+  // d.type==="name" branch of contentFor. It never reads a .name/.title field, so adding
+  // those here would be dead weight. Line 1 is the name, the remaining lines are the role.
+  // Deliberately NOT "Pastor Mike Reynolds": that is the Name element's OWN factory
+  // placeholder, so reusing it would make this button indistinguishable from doing nothing
+  // (the same trap SAMPLE1 had with John 3:16) and make any test of it pass for the wrong
+  // reason. The button appearing dead was never the DATA — it was a look with no live Name
+  // element and no feedback; the handler below now says which fix applies.
+  const SAMPLEN={ref:"",translation:"",
+    body:"Dr. Sarah Whitfield\nGuest Speaker",rawText:"Dr. Sarah Whitfield\nGuest Speaker"};
   // ONE live log of scripture refs. It is fed ONLY by the live ProPresenter feed
   // (or the manual "Add test verse" button). Sample-verse buttons and preview edits
   // never touch it, so nothing from preview leaks into the live/program list.
@@ -2633,7 +2645,18 @@ if(!isOutput){
   // sample buttons only drive the PREVIEW main scripture (for styling) — they do NOT log
   $("simV1").onclick=()=>{ liveMode&&toggleLive(false); pvStage.setLive(SAMPLE1); setTally(pvMonTally,true); };
   $("simV2").onclick=()=>{ liveMode&&toggleLive(false); pvStage.setLive(SAMPLE2); setTally(pvMonTally,true); };
-  $("simName").onclick=()=>{ liveMode&&toggleLive(false); pvStage.setLive(SAMPLEN); setTally(pvMonTally,true); };
+  $("simName").onclick=()=>{
+    liveMode&&toggleLive(false); pvStage.setLive(SAMPLEN); setTally(pvMonTally,true);
+    // A look with no LIVE-sourced name element has nothing that can show this, so the button
+    // would just sit there doing nothing visible. Say so instead of looking broken.
+    const els=(preview&&preview.elements)||[];
+    const names=els.filter(e=>e&&e.type==="name"&&e.visible!==false);
+    // A MANUAL element ignores live data by design (manualContent returns its own content),
+    // so a Name element that exists but is set to Manual still shows nothing new. Those are
+    // two different fixes, so name the one that actually applies.
+    const canShow=names.some(e=>!e.source||e.source.kind!=="manual");
+    if(!canShow) flash($("simName"),names.length?"Set Name source to Live":"Add a Name element");
+  };
   $("simClear").onclick=()=>{ pvStage.setLive(null); setTally(pvMonTally,false); };
   function toggleLive(v){ liveMode=v; $("simLive").classList.toggle("on",v);
     $("simLive").textContent="Live ProPresenter feed: "+(v?"ON":"OFF");
