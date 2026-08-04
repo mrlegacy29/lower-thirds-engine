@@ -28,7 +28,7 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
 // PAINTED-only. These used to read textContent, which counts elements the engine has taken
 // off air (it hides by setting opacity:0 on the .lt-el wrapper) — so "renders on air" passed
 // for graphics composited fully transparent into the OBS browser source. See test/_onair.js.
-const { painted } = require('./_onair');
+const { painted, onAirText } = require('./_onair');
 const outWrap = (sel) => [...D.querySelectorAll('#out-scaler .lt-el')].find(x => x.querySelector(sel));
 const outRef = () => { const w = outWrap('.r-ref'); const n = w && w.querySelector('.r-ref');
   return (n && painted(n, W, D)) ? n.textContent : ''; };
@@ -185,6 +185,49 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
     try { ML(null); ML(undefined); ML({}); ML({ elements: null }); ML({ elements: [null, {}] }); }
     catch (e) { threw = true; }
     ok('migrateLayout: a malformed config does not throw', !threw);
+  }
+
+  /* -------- nothing unscannable, and no raw {{braces}}, may sit on air --------
+     A QR that cannot produce a code used to stay on air painting only its caption
+     ("SCAN TO GIVE") over an empty plate — which reads as working and sends the
+     congregation nowhere. Three distinct ways to get there, only the first was handled.
+     And the reference-list heading was the one operator-typed field that skipped subVars,
+     so a bound placeholder went to air as literal braces. */
+  {
+    const onAirCount = () => [...D.querySelectorAll('#out-scaler .lt-el')]
+      .filter(e => e.style.opacity !== '0').length;
+    const mkQr = (text) => { const e = W.createElement('qr');
+      e.content = Object.assign({}, e.content, { text, label: 'SCAN TO GIVE' }); return e; };
+    const put = (els) => { const c = W.defaultConfig(); c.elements = els; c._take = Date.now();
+      pushSSE(c); };
+
+    put([mkQr('https://example.org/give')]); await sleep(350);
+    ok('QR: a valid link goes on air', onAirCount() > 0);
+    ok('QR: ...and actually carries a code', !!D.querySelector('#out-scaler svg'));
+
+    put([mkQr('{{giveUrl}}')]); await sleep(350);
+    ok('QR: an UNRESOLVED placeholder leaves air (no bare caption)', onAirCount() === 0);
+
+    put([mkQr('https://')]); await sleep(350);
+    ok('QR: the factory https:// sentinel leaves air', onAirCount() === 0);
+
+    put([mkQr('https://example.org/' + 'x'.repeat(260))]); await sleep(350);
+    ok('QR: a payload past the 213-byte capacity leaves air', onAirCount() === 0);
+
+    // An eventList, NOT a history element: history has no items here, so its heading is
+    // hidden and the assertion would pass whether or not substitution happened. eventList
+    // supplies its own items, so the heading is genuinely painted.
+    // Heading still renders (no regression from routing it through subVars). The
+    // SUBSTITUTION itself is pinned in databind_test: CUR_VARS is overwritten by the stage
+    // on every render from the live data feed (lt.html:2390), so a var injected from a test
+    // cannot survive to paint time here — asserting it on this page would be theatre.
+    // An UNKNOWN placeholder is also left verbatim by design, so braces alone prove nothing.
+    const ev = W.createElement('eventList');
+    ev.content = Object.assign({}, ev.content, { heading: 'Service Order', items: 'Welcome\nWorship' });
+    put([ev]); await sleep(400);
+    const air = onAirText(D, W);
+    ok('list heading renders on air', /Service Order/.test(air));
+    ok('...with its items', /Welcome/.test(air));
   }
 
   console.log('OUTPUT RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));

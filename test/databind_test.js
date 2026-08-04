@@ -55,6 +55,16 @@ setTimeout(async () => {
 
   // the decision: unknown/empty stays visible rather than silently blanking
   ok('applyVars: an UNKNOWN placeholder is left verbatim', W.applyVars('{{nope}}', V) === '{{nope}}');
+
+  // The reference-list / event-list heading was the ONE operator-typed field that read
+  // d.content.heading raw, so a bound placeholder went to air as literal braces. Pinned at
+  // the call site: CUR_VARS is overwritten by the stage from the live feed on every render
+  // (lt.html:2390), so a var injected by a test cannot survive to paint time — a rendered
+  // assertion here would pass whatever the code did.
+  ok('list heading is read through subVars, like every other operator field',
+     html.indexOf('const hd=(subVars(d.content||{}).heading)') >= 0);
+  ok('...and the raw d.content.heading read is gone',
+     html.indexOf('lab.textContent=d.content.heading') < 0);
   ok('applyVars: an EMPTY value is left verbatim too', W.applyVars('{{e}}', { e: '' }) === '{{e}}');
   ok('applyVars: a partial brace is not treated as a placeholder', W.applyVars('{{unclosed', V) === '{{unclosed');
 

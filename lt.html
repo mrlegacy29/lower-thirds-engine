@@ -2040,10 +2040,16 @@ function makeElRenderer(){
     } else if(t==="history"||t==="eventList"){
       const lab=content.querySelector(".h-label");
       const items=(data&&data.items)||[];
-      lab.textContent=d.content.heading||"";
+      // Run it through subVars like every other operator-typed field. This read
+      // d.content.heading RAW — the only field in the app that skipped substitution — so a
+      // bound {{placeholder}} went to air as literal braces. Resolve ONCE and use the
+      // resolved value for BOTH the text and the visibility test, or a heading that
+      // resolves to "" would still count as present and paint an empty label.
+      const hd=(subVars(d.content||{}).heading)||"";
+      lab.textContent=hd;
       // Hide the heading when the list is empty/cleared so there's no floating label on air.
       // In the interactive builder, keep it visible so the element stays selectable/positionable.
-      lab.style.display=(d.content.heading && d.showHeading!==false && (items.length>0 || interactive || (data&&data.headerHold)))?"block":"none";
+      lab.style.display=(hd && d.showHeading!==false && (items.length>0 || interactive || (data&&data.headerHold)))?"block":"none";
       typeCss(lab,st.heading);
       renderHistChips(d,items);
     } else if(t==="qr"){
@@ -2067,10 +2073,14 @@ function makeElRenderer(){
         if(!svg&&interactive){
           const hint=el("div",{style:"display:flex;align-items:center;justify-content:center;height:100%;"+
             "font-size:13px;color:#8aa;text-align:center;padding:8px"});
+          // "https://" is the FACTORY SENTINEL, not a link. Testing `payload` alone made it
+          // truthy, so a brand-new QR told the operator their link was too long before they
+          // had typed anything — while the inspector next to it read "8 of 213 bytes used".
+          const noLink=!payload||payload==="https://";
           hint.append(document.createTextNode(
             unresolved?"Waiting for live data — this link still has an unfilled {{placeholder}}."
-            :payload?"That link is too long for a QR code (max 213 bytes)."
-            :"Add a link in the inspector."));
+            :noLink?"Add a link in the inspector."
+            :"That link is too long for a QR code (max 213 bytes)."));
           img.append(hint);
         }
       }
@@ -2283,11 +2293,21 @@ function createStage(scaler,opts){
     if(d.type==="eventList"){ const lines=String(subVars(d.content||{}).items||"").split("\n").map(s=>s.trim()).filter(Boolean);
       return {items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
     if(d.type==="qr"){
-      const c=d.content||{}, payload=String(c.text||"");
-      // An unconfigured QR would otherwise composite a blank plate on air; keep it
-      // visible in the builder so it can still be positioned and styled.
-      if((!payload||payload==="https://")&&!interactive) return null;
-      return {qrText:payload};
+      const c=d.content||{}, raw=String(c.text||"");
+      const payload=applyVars(raw,CUR_VARS);
+      // Anything that will not produce a SCANNABLE CODE must leave air entirely, or the
+      // element paints its caption ("SCAN TO GIVE") over an empty plate — which reads as
+      // working and sends the congregation nowhere. Three cases, not one:
+      //   - no link configured / still the https:// sentinel
+      //   - an unresolved {{placeholder}} (live data has not arrived, or the name is wrong)
+      //   - a payload past the encoder's capacity, which makes qrSvg() return null
+      // 213 bytes is the v10 / ECC-M byte-mode limit the inspector also quotes. Measured in
+      // BYTES, matching the encoder — an accented character or emoji costs 2-4.
+      let bytes=0; try{ bytes=unescape(encodeURIComponent(payload)).length; }catch(e){ bytes=payload.length; }
+      const scannable = payload && payload!=="https://" && !/\{\{[^}]*\}\}/.test(payload) && bytes<=213;
+      // keep it visible in the builder so it can still be positioned and styled
+      if(!scannable && !interactive) return null;
+      return {qrText:raw};
     }
     if(d.type==="clock"){
       // subVars so a clock label can carry a bound {{placeholder}} like every other
@@ -3324,11 +3344,23 @@ if(!isOutput){
     if(t==="qr"){
       // The limit is 213 BYTES, not characters — an accented letter or emoji costs 2-4.
       // Counting characters told the operator a link fitted when it did not.
-      let len=0; try{ len=unescape(encodeURIComponent(String(c.text||""))).length; }catch(e){ len=(c.text||"").length; }
+      const qrBytes=(s)=>{ try{ return unescape(encodeURIComponent(String(s||""))).length; }catch(e){ return String(s||"").length; } };
+      // The counter is repainted from the INPUT handler. Built once at panel-build time it
+      // froze at whatever the value was when the inspector was drawn, so it kept saying a
+      // link fitted while the operator typed past 213 bytes. renderPanels() on every
+      // keystroke is not an option — it destroys the field being typed into.
+      const qrHint=el("p",{class:"hint"});
+      const paintQrLen=()=>{
+        const len=qrBytes(c.text);
+        qrHint.style.color=len>213?"#ff9d96":"";
+        qrHint.textContent=len
+          ? (len+" of 213 bytes used."+(len>213?"  Too long — shorten the link.":""))
+          : "Paste your giving link. Up to 213 bytes.";
+      };
+      paintQrLen();
       return group("QR code",[
-        rowArea("Link or text",c.text,(v)=>{c.text=v;onCh();},"https://church.example.org/give"),
-        el("p",{class:"hint",style:len>213?"color:#ff9d96":"",
-          text:len?(len+" of 213 bytes used."+(len>213?" Too long — shorten the link.":"")):"Paste your giving link. Up to 213 bytes."}),
+        rowArea("Link or text",c.text,(v)=>{c.text=v;paintQrLen();onCh();},"https://church.example.org/give"),
+        qrHint,
         rowText("Caption",c.label,(v)=>{c.label=v;onCh();},"e.g. SCAN TO GIVE"),
         rowColor("Code colour",c.fg||"#000000",(v)=>{c.fg=v;onCh();}),
         rowToggle("White backing plate (recommended)",c.plate!==false,(v)=>{c.plate=v;onCh();renderPanels();}),
