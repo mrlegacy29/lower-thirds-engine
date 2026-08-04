@@ -43,7 +43,10 @@ const dom = new JSDOM(html, {
 });
 const W = dom.window, D = W.document;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const out = () => (D.querySelector('#out-scaler') || {}).textContent || '';
+const { onAirText } = require('./_onair');
+// PAINTED text only — textContent counts elements the engine has taken off air, so this
+// used to pass for graphics composited fully transparent into the OBS source.
+const out = () => onAirText(D, W);
 const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
 let pass = 0, fail = 0, take = 200;
 const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL**') + '  ' + n); c ? pass++ : fail++; };

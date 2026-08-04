@@ -25,10 +25,17 @@ const dom = new JSDOM(html, {
 const W = dom.window, D = W.document;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL**') + '  ' + n); c ? pass++ : fail++; };
+// PAINTED-only. These used to read textContent, which counts elements the engine has taken
+// off air (it hides by setting opacity:0 on the .lt-el wrapper) — so "renders on air" passed
+// for graphics composited fully transparent into the OBS browser source. See test/_onair.js.
+const { painted } = require('./_onair');
 const outWrap = (sel) => [...D.querySelectorAll('#out-scaler .lt-el')].find(x => x.querySelector(sel));
-const outRef = () => { const w = outWrap('.r-ref'); return w ? w.querySelector('.r-ref').textContent : ''; };
-const outList = () => { const e = outWrap('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].map(t => t.textContent) : []; };
-const outHeadingShown = () => { const w = outWrap('.h-label'); const h = w && w.querySelector('.h-label'); return !!h && h.style.display !== 'none'; };
+const outRef = () => { const w = outWrap('.r-ref'); const n = w && w.querySelector('.r-ref');
+  return (n && painted(n, W, D)) ? n.textContent : ''; };
+const outList = () => { const e = outWrap('.h-items');
+  return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].filter(t => painted(t, W, D)).map(t => t.textContent) : []; };
+const outHeadingShown = () => { const w = outWrap('.h-label'); const h = w && w.querySelector('.h-label');
+  return !!h && h.style.display !== 'none' && painted(h, W, D); };
 const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
 
 (async () => {

@@ -36,7 +36,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 let pass = 0, fail = 0;
 const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL**') + '  ' + n); c ? pass++ : fail++; };
 const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
-const outText = () => (D.querySelector('#out-scaler') || {}).textContent || '';
+const { onAirText } = require('./_onair');
+// painted text only — see test/_onair.js
+const outText = () => onAirText(D, W);
 const manual = (type, content) => { const e = W.createElement(type); e.source = { kind: 'manual' }; e.content = content; return e; };
 const withConn = (cfg) => { cfg.conn = Object.assign({}, cfg.conn, { host: '127.0.0.1', port: 1025, pollMs: 200 }); return cfg; };
 

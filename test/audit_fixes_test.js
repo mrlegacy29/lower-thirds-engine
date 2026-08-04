@@ -30,7 +30,9 @@ const dom = new JSDOM(html, {
 });
 const W = dom.window, D = dom.window.document;
 const push = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
-const out = () => (D.querySelector('#out-scaler') || {}).textContent || '';
+const { onAirText } = require('./_onair');
+// painted text only — see test/_onair.js
+const out = () => onAirText(D, W);
 let take = 4000;
 
 setTimeout(async () => {
