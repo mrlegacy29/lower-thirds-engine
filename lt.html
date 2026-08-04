@@ -1449,8 +1449,27 @@ function lsSet(k,v){
     }
   }
 }
-function loadPresets(){try{const r=localStorage.getItem(LS_PRESETS);if(r)return JSON.parse(r);}catch(e){}
-  return {folders:[{id:uid(),name:"My Presets",items:[]}]};}
+/* A try/catch around JSON.parse only survives INVALID JSON. Valid JSON of the WRONG SHAPE
+   ({"folders":"oops"}, [], null, 42) sailed straight through and then threw on the first
+   presets.folders.forEach() during boot — killing the entire console: both monitors blank,
+   ProPresenter never connects, and no UI left to recover with. And it repeats on every
+   launch, because the bad value is still sitting in localStorage. Validate the shape. */
+function loadPresets(){
+  const fallback=()=>({folders:[{id:uid(),name:"My Presets",items:[]}]});
+  let raw=null;
+  try{ raw=localStorage.getItem(LS_PRESETS); }catch(e){ return fallback(); }
+  if(!raw) return fallback();
+  let p=null;
+  try{ p=JSON.parse(raw); }catch(e){ return fallback(); }
+  if(!p||typeof p!=="object"||Array.isArray(p)||!Array.isArray(p.folders)) return fallback();
+  p.folders=p.folders.filter(f=>f&&typeof f==="object"&&!Array.isArray(f)).map(f=>({
+    id:f.id||uid(),
+    name:String(f.name||"Folder").slice(0,60),
+    items:Array.isArray(f.items)?f.items.filter(it=>it&&typeof it==="object"&&!Array.isArray(it)):[]
+  }));
+  if(!p.folders.length) return fallback();
+  return p;
+}
 function savePresets(p){lsSet(LS_PRESETS,p);}
 
 // served by relay over http(s); standalone over file://

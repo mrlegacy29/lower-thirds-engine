@@ -15,7 +15,7 @@ console.log('syntax OK\n');
 const suites = ['final_check2','exclude_test2','sweep','evtest4',
                 'media_motion_test','motion_waapi_test','layer_dock_test','operator_test','custom_take_test',
                 'relay_test','output_test','pp_resilience_test','clear_rule_test','manual_source_test',
-                'source_fallback_test','sdi_test','relay_security_test','graphics_io_test','clock_test','theme_rules_test','qr_test','qr_smoke_test','take_status_test','databind_test','audit_fixes_test'];
+                'source_fallback_test','sdi_test','relay_security_test','graphics_io_test','clock_test','theme_rules_test','qr_test','qr_smoke_test','take_status_test','preset_resilience_test','databind_test','audit_fixes_test'];
 
 // A suite that never exits used to hang the whole run indefinitely — loading lt.html in
 // JSDOM starts the app's setInterval timers, which hold Node's event loop open unless the
