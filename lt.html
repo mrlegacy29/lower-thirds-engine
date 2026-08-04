@@ -2681,7 +2681,14 @@ if(!isOutput){
     }
   });
   // console also subscribes so program monitor follows external takes
-  bus.subscribe((cfg)=>{ program=deepMerge(defaultConfig(),cfg||{}); applyBg(pgMon,program.out.bg); pgStage.setConfig(program); pgStage.setHistory(liveLog); });
+  // lsSet + updateTakeState like every other program-mutating path. Without them a console
+  // attached to an already-running relay took the program over SSE but never recomputed the
+  // pending/dirty indicator — so the TAKE button read "Program matches Preview — you are
+  // live" while the two monitors visibly differed, and the stored program was stale on the
+  // next boot.
+  bus.subscribe((cfg)=>{ program=deepMerge(defaultConfig(),cfg||{}); lsSet(LS_PROGRAM,program);
+    applyBg(pgMon,program.out.bg); pgStage.setConfig(program); pgStage.setHistory(liveLog);
+    if(typeof updateTakeState==="function") updateTakeState(); });
   // seed the relay/localStorage with the current program so a freshly-opened
   // OBS output shows the right look right away (before any Take)
   setTimeout(()=>bus.publish(program),250);
@@ -2800,7 +2807,12 @@ if(!isOutput){
       const _pgFull=isFullClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
       const _pvFull=isFullClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
       if(historyWantsClear(program)) clearLog();
-      if(_pgFull&&_pvFull) logEverShown=false;                 // a full clear ends the session
+      // Reset on the PROGRAM rule alone. logEverShown is the console's twin of the output
+      // page's everShown, and the output page keys off program.conn only — so requiring
+      // BOTH meant that the moment Preview's clear rule differed from Program's (an
+      // un-taken settings change), the Program monitor stopped resetting and permanently
+      // disagreed with what OBS was actually doing.
+      if(_pgFull) logEverShown=false;                          // a full clear ends the session
       pgStage.setHeaderHold(logEverShown&&!_pgFull); pvStage.setHeaderHold(logEverShown&&!_pvFull);
     } else {
       // Same rule as the output page (onSlide): live text alone must not raise the header,
@@ -4031,9 +4043,17 @@ if(!isOutput){
           // Cancel/Escape must NOT be the destructive branch. It was wired as
           // "Cancel = REPLACE everything", so dismissing the dialog wiped the entire
           // preset library. Ask for the destructive option explicitly instead.
-          const replace=confirm("Import "+r.payload.length+" folder(s).\n\n"+
+          // Count the PRESETS, not just the folders. parseGfx accepts a library whose
+          // folders are all empty, so "Import 1 folder(s)" followed by REPLACE silently
+          // destroyed every saved look and put nothing back. Say what is actually in the
+          // file, and make replace-with-nothing its own explicit confirmation.
+          const incoming=r.payload.reduce((n,f)=>n+((f&&f.items&&f.items.length)||0),0);
+          const have=presets.folders.reduce((n,f)=>n+((f&&f.items&&f.items.length)||0),0);
+          const replace=confirm("Import "+r.payload.length+" folder(s) containing "+incoming+" saved look(s).\n\n"+
             "OK = REPLACE your whole preset library.\nCancel = ADD these folders to it.");
-          if(replace && !confirm("Really replace ALL "+presets.folders.length+" existing folder(s)?\n\nThis cannot be undone."))return;
+          if(replace && incoming===0 &&
+             !confirm("That file contains NO saved looks.\n\nReplacing would delete all "+have+" of yours and put nothing back.\n\nAre you sure?"))return;
+          if(replace && !confirm("Really replace ALL "+presets.folders.length+" existing folder(s) ("+have+" look(s))?\n\nThis cannot be undone."))return;
           presets.folders=replace?r.payload:presets.folders.concat(r.payload);
           savePresets(presets); renderPanels();
         }
