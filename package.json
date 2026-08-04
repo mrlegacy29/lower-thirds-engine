@@ -27,6 +27,7 @@
       "relay.js",
       "sdi.js",
       "lt.html",
+      "vendor/**",
       "build/icon.*",
       "!test/**",
       "!**/*.md",
@@ -57,6 +58,9 @@
         "repo": "lower-thirds-engine",
         "releaseType": "release"
       }
+    ],
+    "asarUnpack": [
+      "vendor/macadam/**"
     ]
   },
   "devDependencies": {

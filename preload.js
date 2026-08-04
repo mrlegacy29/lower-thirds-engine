@@ -72,7 +72,7 @@ function injectBanner() {
   const barWrap = document.createElement("span"); barWrap.className = "bar"; barWrap.style.display = "none";
   const bar = document.createElement("i"); barWrap.appendChild(bar);
   btnEl = document.createElement("button"); btnEl.className = "btn"; btnEl.style.display = "none";
-  btnEl.textContent = "Restart & Install";
+  btnEl.textContent = "Install now";   // optional shortcut — closing the app applies it anyway
   btnEl.addEventListener("click", () => ipcRenderer.send("updater:install"));
   const x = document.createElement("button"); x.className = "x"; x.innerHTML = "&times;"; x.title = "Dismiss";
   x.addEventListener("click", () => { dismissed = bannerEl.dataset.key || "1"; hide(); });
@@ -110,7 +110,10 @@ function render(s) {
     const key = "ready:" + (s.newVersion || "");
     bannerEl.dataset.key = key; if (dismissed === key) { hide(); return; }
     bannerEl.classList.add("ready");
-    textEl.innerHTML = "<b>Update ready</b>" + (s.newVersion ? " (v" + s.newVersion + ")" : "") + " \u2014 restart to install.";
+    // autoInstallOnAppQuit is on, so closing the app IS the update \u2014 say so, rather than
+    // implying the button is the only way. Dismissing this no longer strands the update.
+    textEl.innerHTML = "<b>Update ready</b>" + (s.newVersion ? " (v" + s.newVersion + ")" : "") +
+                       " \u2014 installs when you close the app.";
     btnEl.style.display = "";
     show();
   } else if (s.status === "current" && s.announce) {

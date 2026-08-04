@@ -2,7 +2,7 @@
 node_modules/
 
 # build output (installers, unpacked app)
-release/
+/release/   # electron-builder output — anchored, or it also swallows vendor/**/Release/
 dist/
 
 # logs

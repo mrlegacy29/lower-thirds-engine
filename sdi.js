@@ -43,10 +43,21 @@ try { ({ BrowserWindow } = require("electron")); } catch (e) { BrowserWindow = n
 // Try the upstream package and its known forks, so whichever one is made to build
 // on this machine gets picked up without a code change. All of them expose the same
 // playback()/keying API.
-const BRIDGES = ["macadam", "@rezonant/macadam", "@byslin/macadam"];
+// vendor/macadam is OURS: built by tools/build-macadam.js against this app's Electron ABI
+// and patched to need no npm packages at all (that script documents the three separate
+// reasons a plain `npm install macadam` cannot work). Try it first; the published packages
+// stay as fallbacks so a machine that already has one working keeps using it.
+const BRIDGES = [
+  require("path").join(__dirname, "vendor", "macadam"),
+  "macadam", "@rezonant/macadam", "@byslin/macadam"
+];
 let macadam = null, bridgeName = null, loadError = null;
 for (const name of BRIDGES) {
-  try { macadam = require(name); bridgeName = name; loadError = null; break; }
+  try {
+    macadam = require(name);
+    bridgeName = /[\\/]vendor[\\/]/.test(name) ? "macadam (vendored)" : name;
+    loadError = null; break;
+  }
   catch (e) { if (!loadError) loadError = String((e && e.message) || e); }
 }
 

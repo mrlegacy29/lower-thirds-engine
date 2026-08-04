@@ -142,10 +142,17 @@ function safeCheckForUpdates() {
 function setupUpdater() {
   if (!autoUpdater) return;
   autoUpdater.autoDownload = true;            // download in the background once found
-  // Do NOT auto-apply on quit: a live stream PC shouldn't have its version swapped
-  // between Saturday-night close and Sunday service. Install only on the explicit
-  // "Restart & Install" click (ipcMain "updater:install" -> quitAndInstall).
-  autoUpdater.autoInstallOnAppQuit = false;
+  // Updates are already tiny — electron-builder ships a blockmap, so a release downloads
+  // only the CHANGED blocks (measured: 839 KB of a 99.5 MB installer, ~1%). The friction
+  // was never the download, it was applying it: this used to be false, so the ONLY way to
+  // install was the "Restart & Install" button, and that button ran the NSIS installer with
+  // its window visible — which reads like a full reinstall every time.
+  // Now it applies itself silently when the app is closed, so a normal quit is the whole
+  // update. The button still exists for applying it immediately.
+  // NOTE for when this starts driving live services: this means closing the app on Saturday
+  // means Sunday boots a build that has not been used yet. Say the word and this becomes a
+  // "hold updates" toggle instead of a hard-coded choice.
+  autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on("checking-for-update", () => { updateState = { status: "checking" }; pushUpdateState(); });
   autoUpdater.on("update-available", (info) => { updateState = { status: "available", newVersion: info && info.version }; pushUpdateState(); });
   autoUpdater.on("update-not-available", () => {
@@ -171,7 +178,14 @@ ipcMain.on("updater:check", () => {
   if (!autoUpdater) { updateState = { status: "error", message: "Updater not available in dev mode." }; pushUpdateState(); return; }
   safeCheckForUpdates();
 });
-ipcMain.on("updater:install", () => { if (autoUpdater) { try { autoUpdater.quitAndInstall(); } catch (e) {} } });
+// quitAndInstall() defaults to isSilent=false on Windows, which pops the NSIS installer
+// window and its progress bar — the thing that made every update feel like a reinstall
+// ("Install: isSilent: false" in the updater log). isSilent=true applies it in place;
+// isForceRunAfter=true relaunches the app afterwards, so the whole update is a restart.
+ipcMain.on("updater:install", () => {
+  if (!autoUpdater) return;
+  try { autoUpdater.quitAndInstall(true, true); } catch (e) {}
+});
 ipcMain.handle("app:info", () => ({ version: app.getVersion(), name: app.getName(), port: PORT, packaged: app.isPackaged }));
 
 /* ----- DeckLink SDI fill + key -----
