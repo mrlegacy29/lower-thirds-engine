@@ -21,7 +21,11 @@ setTimeout(async()=>{
   const out=[];
   // ---- boot: scripture must be visible on the preview canvas now ----
   const pvEls=D.getElementById('pv-scaler').querySelectorAll('.lt-el');
-  const scrVisible=[...pvEls].some(e=>/For God so loved/.test(e.textContent));
+  // Tracks SAMPLE1, which the console auto-loads into the preview on boot. It used to be
+  // John 3:16 — the SAME text as the Scripture element's factory placeholder — so this
+  // assertion could not tell "the sample loaded" from "the placeholder is showing".
+  // SAMPLE1 is now a different verse, which makes this check mean something.
+  const scrVisible=[...pvEls].some(e=>/The Lord is my shepherd/.test(e.textContent));
   out.push(['boot: scripture sample visible on canvas', scrVisible]);
   out.push(['boot: live-feed button defaults OFF', /OFF/.test(D.getElementById('simLive').textContent)]);
 
