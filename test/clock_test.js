@@ -72,6 +72,17 @@ const putLive = (els) => {
     ok('fmtClock: 12h', W.fmtClock(d, 'h:mm') === '1:05 PM');
     ok('fmtClock: 12h with seconds', W.fmtClock(d, 'h:mm:ss') === '1:05:09 PM');
     ok('fmtClock: 24h', W.fmtClock(d, 'H:mm') === '13:05');
+    // 24-hour formats ZERO-PAD the hour. Unpadded they rendered "9:05" and midnight as
+    // "0:05" — neither is 24-hour time, while the picker advertises them as "13:30".
+    const am = new Date(2026, 7, 1, 9, 5, 7);
+    ok('fmtClock: 24h pads a single-digit hour', W.fmtClock(am, 'H:mm') === '09:05');
+    ok('fmtClock: 24h pads with seconds too', W.fmtClock(am, 'H:mm:ss') === '09:05:07');
+    ok('fmtClock: 24h renders midnight as 00:xx',
+       W.fmtClock(new Date(2026, 7, 1, 0, 5, 0), 'H:mm') === '00:05');
+    // ...and the 12-hour branch must NOT pad — "1:05 PM" is correct, "01:05 PM" is not.
+    ok('fmtClock: 12h stays unpadded', W.fmtClock(am, 'h:mm') === '9:05 AM');
+    // nor may fmtDur gain padding on its leading unit
+    ok('fmtDur: leading unit stays unpadded', W.fmtDur(90, 'h:mm') === '1:30');
     const mid = new Date(2026, 7, 1, 0, 7, 0);
     ok('fmtClock: midnight shows 12, not 0', W.fmtClock(mid, 'h:mm') === '12:07 AM');
   }
@@ -173,7 +184,13 @@ const putLive = (els) => {
 
   /* ------------------------- hide-at-zero takes it off air ------------------------ */
   {
-    const past = new Date(Date.now() - 5 * 60 * 1000);
+    // Clamp to the start of TODAY. Subtracting five minutes from a time in 00:00-00:04
+    // lands on YESTERDAY, and secsUntilClock() deliberately does not roll to another day —
+    // so this fixture failed deterministically for the first five minutes after midnight.
+    // 00:00 is still "already reached" at 00:0x, which is what the assertion needs.
+    const now = new Date();
+    const past = new Date(Math.max(now.getTime() - 5 * 60 * 1000,
+                                   new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()));
     const hhmm = past.getHours() + ':' + String(past.getMinutes()).padStart(2, '0');
     // a target minutes in the past is "already reached" (it only rolls to tomorrow
     // once it's more than a minute stale, which this is not)

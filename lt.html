@@ -1136,7 +1136,11 @@ function fmtDur(secs,fmt){
 }
 function fmtClock(d,fmt){
   let h=d.getHours(); const m=d.getMinutes(), s=d.getSeconds();
-  if(fmt==="H:mm"||fmt==="H:mm:ss") return h+":"+pad2(m)+(fmt==="H:mm:ss"?":"+pad2(s):"");
+  // Zero-pad the HOUR in 24-hour mode. The picker advertises these formats as "13:30", but
+  // an unpadded hour rendered "9:05", and midnight as "0:05" — neither is 24-hour time.
+  // The 12-hour branch below stays unpadded deliberately ("1:30 PM" is correct), and
+  // fmtDur must also stay unpadded on its leading unit.
+  if(fmt==="H:mm"||fmt==="H:mm:ss") return pad2(h)+":"+pad2(m)+(fmt==="H:mm:ss"?":"+pad2(s):"");
   const ap=h>=12?"PM":"AM"; h=h%12; if(h===0)h=12;
   return h+":"+pad2(m)+(fmt==="h:mm:ss"?":"+pad2(s):"")+" "+ap;
 }
@@ -1822,7 +1826,7 @@ function makeElRenderer(){
       const bev=`inset 0 ${d2}px 0 rgba(255,255,255,.30), inset ${d2}px 0 0 rgba(255,255,255,.12), inset 0 -${d2}px 0 rgba(0,0,0,.38), inset -${d2}px 0 0 rgba(0,0,0,.22)`;
       sh = sh ? sh+", "+bev : bev; }
     box.style.boxShadow=sh||"none";
-    box.style.border=b.border?`${b.borderW}px solid ${b.borderColor}`:"none";
+    box.style.border=b.border?`${b.borderW}px solid ${tok(b.borderColor)}`:"none";
     box.style.clipPath=shapeClip(b.shape,rad);
     box.style.backdropFilter=box.style.webkitBackdropFilter=(b.style==="glass"&&!hasMedia?`blur(${b.blur}px)`:"none");
     content.style.padding=`${b.padY}px ${b.padX}px`;
@@ -1835,7 +1839,7 @@ function makeElRenderer(){
     content.className="lt-content"+(b.valign==="top"?" va-top":b.valign==="bottom"?" va-bottom":"")+(willMarq?" marqfill":"");
     const showAcc=b.accent&&b.style!=="minimal"&&!hasMedia;
     accent.style.display=showAcc?"block":"none";
-    accent.style.width=b.accentW+"px"; accent.style.background=b.accentColor;
+    accent.style.width=b.accentW+"px"; accent.style.background=tok(b.accentColor);   // tok(): a brand token here rendered as the literal string "@accent" and the bar kept its old colour
     accent.style.order=(b.accentSide==="right")?2:0;
     setMedia(b);
     const sc=+(b.scrim||0);
@@ -3194,10 +3198,22 @@ if(!isOutput){
 
   function motionGroup(d,onCh){
     const lp=d.loop||(d.loop=loopDefaults());
-    const rows=[ rowSelect("Continuous motion",lp.type,[
+    // Ticker / Credits-roll only exist for the types in MARQ_TYPES \u2014 setText hands off to
+    // renderMarquee only for those. Offering them on Timer/clock, QR and Image/Media gave
+    // the operator two options that silently did nothing at all. Hide them there rather
+    // than implement scrolling for a QR code.
+    const canScroll=MARQ_TYPES.indexOf(d.type)>=0;
+    const motionOpts=[
       ["none","None (static)"],["pulse","Pulse / breathe"],["glow","Glow pulse"],
       ["float","Float / drift"],["sway","Sway"],["spin","Spin"],["shine","Shine sweep"],
-      ["gradientShift","Gradient shift"],["ticker","Ticker \u2014 banner scroll"],["rollV","Credits roll \u2191"]],
+      ["gradientShift","Gradient shift"]];
+    if(canScroll) motionOpts.push(["ticker","Ticker \u2014 banner scroll"],["rollV","Credits roll \u2191"]);
+    // A look saved before this (or hand-edited) can still carry ticker/rollV on a type that
+    // cannot scroll. Keep the stored value selectable so the picker does not silently
+    // reassign it, but label it honestly.
+    if(!canScroll&&(lp.type==="ticker"||lp.type==="rollV"))
+      motionOpts.push([lp.type,(lp.type==="ticker"?"Ticker":"Credits roll")+" \u2014 not supported on this element"]);
+    const rows=[ rowSelect("Continuous motion",lp.type,motionOpts,
       (v)=>{lp.type=v;onCh();renderPanels();}) ];
     if(lp.type!=="none"){
       const fast=(lp.type==="ticker"||lp.type==="rollV"||lp.type==="spin"||lp.type==="shine"||lp.type==="gradientShift");
@@ -3606,7 +3622,10 @@ if(!isOutput){
     bulletList:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
     history:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
     eventList:{heading:{color:"@accent",font:"@display"}, item:{color:"@ink",font:"@body"}},
-    clock:{label:{color:"@accent",font:"@display"}, time:{color:"@ink",font:"@display"}}
+    clock:{label:{color:"@accent",font:"@display"}, time:{color:"@ink",font:"@display"}},
+    // QR had no entry at all, so "Apply theme to all elements" silently skipped it and the
+    // caption kept its literal colour/font. @ink not @accent: it is a headline-style caption.
+    qr:{label:{color:"@ink",font:"@display"}}
   };
   function applyThemeToAll(){
     let n=0;
@@ -3619,6 +3638,10 @@ if(!isOutput){
       });
       if(d.accentColor!==undefined) d.accentColor="@accent";
       if(d.chipBg!==undefined) d.chipBg="@panel";
+      // The accent BAR down the side of the box lives in d.box, not on the element, so it
+      // was skipped entirely: "Apply theme to all elements" reported success and left every
+      // bar the old gold. Counted too, so the number it reports matches what changed.
+      if(d.box && d.box.accentColor!==undefined){ d.box.accentColor="@accent"; n++; }
     });
     applyPreview(); renderPanels();
     return n;
