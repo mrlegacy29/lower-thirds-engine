@@ -122,21 +122,19 @@ function available() {
 async function listDevices() {
   if (!macadam) return [];
   try {
-    // macadam exposes a device count plus per-device info; tolerate either shape.
-    const n = typeof macadam.deviceCount === "function" ? macadam.deviceCount() : (macadam.deviceCount || 0);
-    const out = [];
-    for (let i = 0; i < n; i++) {
-      let info = {};
-      try { info = (typeof macadam.deviceInfo === "function" ? macadam.deviceInfo(i) : {}) || {}; } catch (e) {}
-      out.push({
-        index: i,
-        name: info.modelName || info.displayName || ("DeckLink device " + i),
-        display: info.displayName || info.modelName || ("DeckLink device " + i),
-        // surface whether the card can actually do an external (fill+key) keyer
-        keyable: info.supportsExternalKeying !== false,
-      });
-    }
-    return out;
+    // macadam.getDeviceInfo() returns an ARRAY of capability objects, one per device
+    // (modelName / displayName / supportsExternalKeying / ...). There is NO deviceCount()
+    // or deviceInfo(i) in macadam — probing for them left n = 0, so the loop never ran and
+    // this returned [] on every machine. The console would therefore tell every operator
+    // "No DeckLink found" even with a working card, and the device picker never rendered.
+    const infos = typeof macadam.getDeviceInfo === "function" ? macadam.getDeviceInfo() : [];
+    return (Array.isArray(infos) ? infos : []).map((info, i) => ({
+      index: i,
+      name: (info && (info.modelName || info.displayName)) || ("DeckLink device " + i),
+      display: (info && (info.displayName || info.modelName)) || ("DeckLink device " + i),
+      // whether the card can drive an EXTERNAL keyer, i.e. a real fill+key pair
+      keyable: !info || info.supportsExternalKeying !== false,
+    }));
   } catch (e) { return []; }
 }
 

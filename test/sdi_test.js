@@ -23,8 +23,10 @@ const sdi = require('../sdi.js');
 {
   const a = sdi.available();
   ok('sdi: available() reports a boolean ok', typeof a.ok === 'boolean');
-  ok('sdi: when the bridge is missing it explains how to install it',
-     a.ok || /macadam/i.test(String(a.reason)));
+  // `a.ok || ...` short-circuited: now that macadam is vendored a.ok is true, so this
+  // assertion checked nothing at all. Assert whichever state we are actually in.
+  ok(a.ok ? 'sdi: a present bridge names itself' : 'sdi: a missing bridge explains how to install it',
+     a.ok ? /macadam/i.test(String(a.bridge)) : /macadam/i.test(String(a.reason)));
   const m = sdi.modes();
   ok('sdi: exposes a video-mode list', Array.isArray(m) && m.length > 0);
   ok('sdi: every mode carries id/label/w/h/fps',
@@ -177,6 +179,40 @@ function boot(desktop) {
     ok('config-guard: the video mode did NOT leak into the program config', !/bmdModeHD1080p25/.test(prog));
     ok('config-guard: no sdi key was added to the config', !/pplt\.sdi|"sdi"\s*:/.test(prev));
     ok('config-guard: nothing threw', errors.length === 0);
+  }
+
+  /* ---------------- device enumeration against macadam's REAL api ----------------
+     listDevices() probed macadam.deviceCount()/deviceInfo(i). Neither exists — the real
+     API is getDeviceInfo(), which returns an ARRAY of capability objects. So the loop
+     bound was always 0 and this returned [] on every machine: the console told every
+     operator "No DeckLink found" even with a working card, and the picker never rendered.
+     There is no card on a dev box, so stub the CACHED macadam instance (sdi.js closes over
+     the same require-cache object) and assert the mapping. */
+  {
+    let mac = null;
+    try { mac = require('../vendor/macadam'); } catch (e) { mac = null; }
+    ok('sdi: the vendored macadam bridge is loadable', !!mac);
+    if (mac) {
+      ok('sdi: macadam exposes getDeviceInfo (not deviceCount)',
+         typeof mac.getDeviceInfo === 'function' && typeof mac.deviceCount === 'undefined');
+      const real = mac.getDeviceInfo;
+      mac.getDeviceInfo = () => ([
+        { modelName: 'DeckLink 8K Pro', displayName: 'DeckLink 8K Pro (1)', supportsExternalKeying: true },
+        { modelName: 'DeckLink 8K Pro', displayName: 'DeckLink 8K Pro (2)', supportsExternalKeying: false },
+      ]);
+      try {
+        const d = await sdi.listDevices();
+        ok('sdi: listDevices() enumerates the cards macadam reports', d.length === 2);
+        ok('sdi: it carries the model name through', /8K Pro/.test((d[0] || {}).display || ''));
+        ok('sdi: it indexes them from 0', d[0] && d[0].index === 0 && d[1] && d[1].index === 1);
+        ok('sdi: it reports external-keying support per device',
+           d[0] && d[0].keyable === true && d[1] && d[1].keyable === false);
+        mac.getDeviceInfo = () => { throw new Error('Unable to load DeckLinkAPI.'); };
+        const none = await sdi.listDevices();
+        ok('sdi: no driver installed degrades to an empty ARRAY, not a throw',
+           Array.isArray(none) && none.length === 0);
+      } finally { mac.getDeviceInfo = real; }
+    }
   }
 
   console.log('\nSDI RESULT  pass=' + pass + '  fail=' + fail);
