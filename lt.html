@@ -1032,9 +1032,13 @@ function evalRules(rules,ctx){
   ctx=ctx||{};
   if(ctx.cleared) return out;                 // cleared -> no rule holds anything on air
   const text=String(ctx.text||""), ref=String(ctx.ref||"");
+  // The ProPresenter GROUP and slide LABEL of whatever is live. These make "put THIS
+  // scripture in the top lower third and THAT one in the bottom" a thing the operator
+  // builds in ProPresenter, rather than something the engine has to infer from the words.
+  const group=String(ctx.group||""), label=String(ctx.label||"");
   (Array.isArray(rules)?rules:[]).forEach(r=>{
     if(!r||r.enabled===false||!r.target)return;
-    const hay=(r.on==="ref")?ref:text;
+    const hay=(r.on==="ref")?ref:(r.on==="group")?group:(r.on==="label")?label:text;
     let hit=false;
     if(r.match==="any") hit=true;
     else if(r.match==="regex"){ try{ hit=new RegExp(String(r.pattern||""),"i").test(hay); }catch(e){ hit=false; } }
@@ -1661,6 +1665,22 @@ function isFullClear(rule, layer, signals){
     default:       return signals.allOff===true;                  // every visual layer off
   }
 }
+/* ProPresenter's presentation payload nests slides inside named groups, but the live
+   position (/v1/presentation/slide_index) is a FLAT index across the whole deck. Flatten
+   once per deck so the index resolves in O(1) instead of walking groups on every poll.
+   Verified against PP 21.2: groups carry `name` + `color`, each slide carries `label`,
+   `notes` and `text`. Slides expose no uuid, so the index is the only join. */
+function flattenGroups(pres){
+  const out=[];
+  const gs=(pres&&pres.groups)||[];
+  gs.forEach(g=>{
+    const gname=(g&&g.name!=null)?String(g.name):"";
+    ((g&&g.slides)||[]).forEach(s=>{
+      out.push({ group:gname, label:(s&&s.label!=null)?String(s.label):"" });
+    });
+  });
+  return out;
+}
 function createPP(opts){
   let host,port,pollMs,timer=null,running=false,lastKey="",lastSigKey="",supportsLayers=true;
   let lastActive=null,lastAllClr=null,lastLayers=null,lastPres=null;
@@ -1670,6 +1690,10 @@ function createPP(opts){
   // second poll loop, and the stale one could repaint a previous verse on air.
   let gen=0;
   let wantTimers=false;      // set true only while a clock element mirrors a PP timer
+  // ProPresenter GROUP / slide LABEL of whatever is live. These let a look route by
+  // "which group is this verse in" instead of only "is something live" — one scripture
+  // element per screen position, chosen by the group the operator built in PP.
+  let presUid=null, presFlat=[], slideGroup="", slideLabel="";
   // A layers payload we don't recognise used to latch layer support off for the
   // whole session on ONE bad read (a {} body, a 200-with-error, a PP hiccup), and
   // clear detection never came back. Require several in a row.
@@ -1715,8 +1739,27 @@ function createPP(opts){
       // presentation/active distinguishes Clear All (presentation cleared -> null) from
       // Clear Slide (slide hidden but the presentation stays active -> populated). Hold last on a blip.
       try{ const pr=await ppGet("/v1/presentation/active",sig);
-        if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation!=null); lastPres=presPop; }
+        if(pr.ok){ const pj=await pr.json(); const pd=(pj&&pj.data)||pj||{}; presPop=(pd.presentation!=null); lastPres=presPop;
+          // Same response already carries the GROUP structure — names, colours and every
+          // slide's label. Cache it by presentation uuid so the flat slide list is only
+          // rebuilt when the deck actually changes, not 5x a second.
+          const pres=pd.presentation;
+          const puid=(pres&&pres.id&&pres.id.uuid)||null;
+          if(puid && puid!==presUid){ presUid=puid; presFlat=flattenGroups(pres); }
+          else if(!puid){ presUid=null; presFlat=[]; }
+        }
       }catch(e){ /* transient — hold last */ }
+      if(!running || myGen!==gen) return;
+      // Which slide is live, so it can be resolved back to its group + label. Only worth
+      // asking when the deck actually has groups to resolve into.
+      if(presFlat.length){
+        try{ const ir=await ppGet("/v1/presentation/slide_index",sig);
+          if(ir.ok){ const ij=await ir.json();
+            const idx=(ij&&ij.presentation_index&&typeof ij.presentation_index.index==="number")?ij.presentation_index.index:null;
+            if(idx!=null && presFlat[idx]){ slideGroup=presFlat[idx].group||""; slideLabel=presFlat[idx].label||""; }
+          }
+        }catch(e){ /* transient — hold the last group/label */ }
+      } else { slideGroup=""; slideLabel=""; }
       if(!running || myGen!==gen) return;
       // Timers are only polled when a clock element is actually mirroring one, so
       // the common config pays nothing for this.
@@ -1742,11 +1785,17 @@ function createPP(opts){
       // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
       const cleared = (active===false) || (active===null && !slideText.trim());
       const clearAll = (allClr===true);
-      const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll };
+      // group/label ride along so a look can route by them, and so the console's diagnostic
+      // strip can show the operator what the engine is actually seeing.
+      const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll,
+                        group:slideGroup, label:slideLabel };
       const sigKey = active+"|"+presPop+"|"+JSON.stringify(layersMap||0);
       // Callback exceptions are contained: a render error must never stop the feed.
       if(sigKey!==lastSigKey){ lastSigKey=sigKey; try{ opts.onSignals && opts.onSignals(signals); }catch(e){} }
-      const key=(cleared?"__CLEAR__":slideText)+"|"+active+"|"+clearAll+"|"+presPop;
+      // group/label are part of the key: moving between two slides that share the same TEXT
+      // but sit in different groups is a real change (that is the whole point of routing by
+      // group), and without them here the update would be skipped as a duplicate.
+      const key=(cleared?"__CLEAR__":slideText)+"|"+active+"|"+clearAll+"|"+presPop+"|"+slideGroup+"|"+slideLabel;
       if(key!==lastKey){ lastKey=key; try{ opts.onUpdate(cleared?"":slideText, active, clearAll, signals); }catch(e){} }
     }catch(e){
       /* nothing above may kill the loop — the finally below always re-arms */
@@ -2296,6 +2345,9 @@ function createStage(scaler,opts){
   const renderers=new Map(); let cfg=null; let selectedId=null;
   let live=null;   // {ref,body,translation,rawText} or null
   let ruleState={};// {elementId:bool} from evalRules() — automation overrides
+  // ProPresenter group / slide label of the live slide. Rules can match on these, so a
+  // look routes by WHERE the operator filed the slide in PP rather than by its wording.
+  let slideMeta={group:"",label:""};
   let dataVars={}; // {name:value} from bound live-data sources
   let timers=[];   // live ProPresenter timer objects, for clock elements in "pptimer" mode
   let history=[];
@@ -2446,7 +2498,7 @@ function createStage(scaler,opts){
     // rebuilt in setLive(), so disabling or deleting a rule and pressing TAKE left its
     // target pinned on air until ProPresenter happened to change slide — and on a held
     // slide (a sermon point, a looping announcement) that is indefinitely.
-    ruleState=evalRules(cfg&&cfg.rules, live?{text:live.rawText||live.body||"",ref:live.ref||"",cleared:false}:{cleared:true});
+    ruleState=evalRules(cfg&&cfg.rules, ruleCtx(live));
     const ids=new Set();
     (cfg.elements||[]).forEach(d=>{
       if(!d)return;
@@ -2463,11 +2515,27 @@ function createStage(scaler,opts){
     (cfg.elements||[]).forEach(d=>{ if(!d)return; const r=renderers.get(d.id); if(r&&r.root)scaler.appendChild(r.root); });
     renderAll();
   }
+  // ONE place that builds the rule context. It was inlined at both call sites, which is
+  // exactly how they drift — group/label would have had to be added twice.
+  function ruleCtx(d){
+    if(!d) return {cleared:true};
+    return { text:d.rawText||d.body||"", ref:d.ref||"",
+             group:slideMeta.group||"", label:slideMeta.label||"", cleared:false };
+  }
+  // Set BEFORE setLive on each poll, so the very first render of a slide already knows
+  // its group — otherwise a group-routed element would flash in the wrong slot for one frame.
+  function setSlideMeta(g,l){
+    const ng=String(g||""), nl=String(l||"");
+    if(ng===slideMeta.group && nl===slideMeta.label) return;
+    slideMeta={group:ng,label:nl};
+    ruleState=evalRules(cfg&&cfg.rules, ruleCtx(live));
+    renderAll();
+  }
   function setLive(d){
     live=d;
     // Recompute automation from the same slide that just landed, so a rule flips its
     // target in the SAME render — not one slide late.
-    ruleState=evalRules(cfg&&cfg.rules, d?{text:d.rawText||d.body||"",ref:d.ref||"",cleared:false}:{cleared:true});
+    ruleState=evalRules(cfg&&cfg.rules, ruleCtx(d));
     renderAll();
   }
   let timersSig="";
@@ -2550,7 +2618,7 @@ function createStage(scaler,opts){
   function clampN(v,a,b){return Math.max(a,Math.min(b,v));}
 
   startClockTick();
-  return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,select,setScale,replayVisible,
+  return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,setSlideMeta,select,setScale,replayVisible,
     hasClock, stopClockTick,
     // Is an automation rule currently holding this element? null = no rule has an opinion.
     // The Layers panel needs this to stop claiming "Visible" for something a rule is
@@ -2595,6 +2663,9 @@ if(isOutput){
   function onSlide(text,active,clearAll,signals){
     const sc=text?parseScripture(text):null;
     const cn=(program&&program.conn)||{};
+    // BEFORE setLive/setHeaderHold below: a group-routed element must know its group on the
+    // very first render of the slide, or it flashes in the wrong slot for one frame.
+    stage.setSlideMeta((signals&&signals.group)||"",(signals&&signals.label)||"");
     if(!text){
       // fallback must match defaultConfig — "pres" cannot tell the two clears apart at all
       const full=isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
@@ -2805,6 +2876,8 @@ if(!isOutput){
     if(!text){ liveData=null; }                                  // clear: hide live verse; log untouched
     else if(sc){ liveData=sc; }
     else { liveData={ref:"",body:text.trim(),translation:"",rawText:text.trim()}; }
+    pgStage.setSlideMeta((signals&&signals.group)||"",(signals&&signals.label)||"");
+    pvStage.setSlideMeta((signals&&signals.group)||"",(signals&&signals.label)||"");
     pgStage.setLive(liveData); setTally({el:$("pgTitle")}, !!liveData);
     if(liveMode){ pvStage.setLive(liveData); setTally(pvMonTally,!!liveData); }
     if(sc&&sc.ref)pushLog(sc.ref);                               // log AFTER setLive (clean exclude-live)
@@ -3674,13 +3747,19 @@ if(!isOutput){
       const sum=el("p",{class:"hint"});
       const paintSummary=()=>{
         const t=(targets.find(x=>x[0]===r.target)||[])[1];
-        sum.innerHTML="While the "+((r.on==="ref")?"reference":"slide text")+" "+
+        const srcName=(r.on==="ref")?"reference":(r.on==="label")?"slide LABEL":(r.on==="group")?"slide GROUP":"slide text";
+        sum.innerHTML="While the "+srcName+" "+
           ((r.match==="any")?"is anything":((r.match==="regex")?"matches ":"contains ")+"<b>"+escapeHtml(r.pattern||"…")+"</b>")+
           ", <b>"+((r.act==="hide")?"hide":"show")+"</b> "+escapeHtml(t||"(pick an element)")+
           " — and do the opposite when it doesn't.";
       };
 
-      card.append(rowSelect("When the live",r.on||"text",[["text","Slide text"],["ref","Scripture reference"]],
+      // Slide LABEL / GROUP come straight from ProPresenter, so a look can route by WHERE the
+      // operator filed the slide rather than by its wording — one scripture element per screen
+      // position, chosen by the label stuck on the slide in PP.
+      card.append(rowSelect("When the live",r.on||"text",
+        [["text","Slide text"],["ref","Scripture reference"],
+         ["label","Slide LABEL (from ProPresenter)"],["group","Slide GROUP (from ProPresenter)"]],
         (v)=>{r.on=v;paintSummary();applyPreview();}));
       card.append(rowSelect("…",r.match||"contains",[["contains","contains"],["regex","matches (regex)"],["any","is anything (always on)"]],
         (v)=>{r.match=v;applyPreview();renderPanels();}));

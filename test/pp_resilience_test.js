@@ -78,6 +78,32 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   slideText = ''; slideActive = false; layersObj = { slide: false, media: false }; await sleep(700);
   ok('H1: F1 Clear-All still wipes the list after a layers blip', pgList().length === 0);
 
+    /* ---- flattenGroups: the join between a live slide index and its group/label ----
+     ProPresenter nests slides inside named groups, but /v1/presentation/slide_index is a
+     FLAT index across the whole deck, and slides expose no uuid — so the index is the only
+     join. Shape verified against PP 21.2 with Brandon's real labelled deck. */
+  {
+    const F = W.flattenGroups;
+    ok('flattenGroups is reachable', typeof F === 'function');
+    const pres = { groups: [
+      { name: 'Verse', slides: [ { label: 'Bot Lower 3rds' }, { label: 'Left Lower 3rds' } ] },
+      { name: 'Chorus', slides: [ { label: 'Right Lower 3rds' }, { label: '' }, { label: 'Top Lower 3rds' } ] }
+    ]};
+    const flat = F(pres);
+    ok('flattenGroups: flattens every slide across groups', flat.length === 5);
+    ok('flattenGroups: index 0 resolves to the first group',
+       flat[0].group === 'Verse' && flat[0].label === 'Bot Lower 3rds');
+    ok('flattenGroups: an index INSIDE the second group resolves correctly',
+       flat[2].group === 'Chorus' && flat[2].label === 'Right Lower 3rds');
+    ok('flattenGroups: the last slide resolves',
+       flat[4].group === 'Chorus' && flat[4].label === 'Top Lower 3rds');
+    ok('flattenGroups: an unlabelled slide yields an empty label, not undefined', flat[3].label === '');
+    ok('flattenGroups: a deck with no groups is empty, not a throw', F({}).length === 0);
+    ok('flattenGroups: null is survivable', F(null).length === 0);
+    ok('flattenGroups: junk slides do not throw',
+       F({ groups: [ { name: 'X', slides: [ null, {} ] } ] }).length === 2);
+  }
+
   console.log('PP-RESILIENCE RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.log('**FAIL** THREW: ' + e.message); console.log('PP-RESILIENCE RESULT  pass=' + pass + '  fail=' + (fail + 1) + '  ERRORS=THREW'); process.exit(1); });

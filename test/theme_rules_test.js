@@ -149,6 +149,37 @@ let take = 900;
        R([mk({ id: 'a', pattern: 'zzz' }), mk({ id: 'b', pattern: 'John' })], { text: 'John 3:16', cleared: false }).E1 === true);
     ok('a matched HIDE beats a matched SHOW (off air is the safe way to be wrong)',
        R([mk({ id: 'a', pattern: 'John' }), mk({ id: 'b', pattern: 'John', act: 'hide' })], { text: 'John 3:16', cleared: false }).E1 === false);
+    /* ---- routing by ProPresenter GROUP / slide LABEL ----
+       The operator files a slide under a label in ProPresenter ("Top Lower 3rds") and the
+       engine puts the verse in the matching element. Verified against a real PP 21.2 deck:
+       four labelled slides each lit exactly one of four positioned scripture elements.
+       Slides 2 and 3 of that deck carry IDENTICAL text and different labels, which is why
+       label/group are part of the poller's change key — without that the second one is
+       skipped as a duplicate and the verse never moves. */
+    const byLabel=(pattern,target)=>({id:'L'+pattern,enabled:true,on:'label',match:'contains',pattern,act:'show',target:target||'E1'});
+    ok('on=label: a matching slide label shows its element',
+       R([byLabel('Top Lower 3rds')],{text:'anything',label:'Top Lower 3rds',cleared:false}).E1===true);
+    ok('on=label: a different label leaves it off',
+       R([byLabel('Top Lower 3rds')],{text:'anything',label:'Bot Lower 3rds',cleared:false}).E1===false);
+    ok('on=label: matching is case-insensitive like the other sources',
+       R([byLabel('top lower 3rds')],{text:'',label:'TOP LOWER 3RDS',cleared:false}).E1===true);
+    ok('on=label: an unlabelled slide matches nothing',
+       R([byLabel('Top Lower 3rds')],{text:'anything',label:'',cleared:false}).E1===false);
+    ok('on=group: matches the ProPresenter group name',
+       R([{id:'G1',enabled:true,on:'group',match:'contains',pattern:'John 1:1-3',act:'show',target:'E1'}],
+         {text:'x',group:'John 1:1-3',cleared:false}).E1===true);
+    ok('on=label does NOT accidentally read the slide text',
+       R([byLabel('Welcome')],{text:'Welcome home',label:'Bot Lower 3rds',cleared:false}).E1===false);
+    ok('on=group does NOT accidentally read the slide text',
+       R([{id:'G2',enabled:true,on:'group',match:'contains',pattern:'Welcome',act:'show',target:'E1'}],
+         {text:'Welcome home',group:'John 1:1-3',cleared:false}).E1===false);
+    // two positions, one live slide: only the labelled one lights
+    {
+      const rr=R([byLabel('Top Lower 3rds','TOP'),byLabel('Bot Lower 3rds','BOT')],
+                 {text:'John 1:1',label:'Bot Lower 3rds',cleared:false});
+      ok('two labelled positions: only the matching one is shown', rr.BOT===true && rr.TOP===false);
+    }
+
     ok('two hide-rules, neither matching -> still released',
        R([mk({ id: 'a', pattern: 'x', act: 'hide' }), mk({ id: 'b', pattern: 'y', act: 'hide' })], { text: 'John 3:16', cleared: false }).E1 === true);
 
