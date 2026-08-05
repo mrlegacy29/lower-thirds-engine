@@ -102,6 +102,47 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
     ok('flattenGroups: null is survivable', F(null).length === 0);
     ok('flattenGroups: junk slides do not throw',
        F({ groups: [ { name: 'X', slides: [ null, {} ] } ] }).length === 2);
+
+    /* ---- deckLib: what fills the per-element binding dropdown ----
+       Measured on PP 21.2: there is NO endpoint exposing the Slide-Labels library
+       (/v1/labels, /v1/slide_labels, /v1/status/labels all 404), so the live deck IS the
+       source and this is how the operator avoids retyping labels into the app. */
+    const L = W.deckLib;
+    ok('deckLib is reachable', typeof L === 'function');
+    const lib = L(flat);
+    ok('deckLib: every distinct label, in deck order',
+       lib.labels.join('|') === 'Bot Lower 3rds|Left Lower 3rds|Right Lower 3rds|Top Lower 3rds');
+    ok('deckLib: unlabelled slides contribute nothing', lib.labels.indexOf('') < 0);
+    ok('deckLib: group names come through de-duplicated',
+       lib.groups.join('|') === 'Verse|Chorus');
+    ok('deckLib: a repeated label appears once',
+       L([{group:'A',label:'Top'},{group:'A',label:'Top'}]).labels.length === 1);
+    ok('deckLib: junk in, empty out (no throw)',
+       L(null).labels.length === 0 && L(undefined).groups.length === 0);
+
+    /* ---- ppMatches: the gate itself ---- */
+    const M = W.ppMatches;
+    ok('ppMatches is reachable', typeof M === 'function');
+    ok('ppMatches: an unbound element matches every slide',
+       M('', {label:'Top Lower 3rds', group:'John 1'}) === true && M(null, {}) === true);
+    ok('ppMatches: L: matches the slide LABEL',
+       M('L:Top Lower 3rds', {label:'Top Lower 3rds', group:'X'}) === true);
+    ok('ppMatches: L: rejects a different label',
+       M('L:Top Lower 3rds', {label:'Bot Lower 3rds', group:'X'}) === false);
+    ok('ppMatches: L: does NOT read the group',
+       M('L:John 1', {label:'', group:'John 1'}) === false);
+    ok('ppMatches: G: matches the GROUP',
+       M('G:John 1:1-3', {label:'Top', group:'John 1:1-3'}) === true);
+    ok('ppMatches: G: does NOT read the label',
+       M('G:Top', {label:'Top', group:'John 1'}) === false);
+    // A label retyped in ProPresenter rarely comes back byte-identical.
+    ok('ppMatches: case and surrounding whitespace are forgiven',
+       M('L: top LOWER 3rds ', {label:'Top Lower 3rds'}) === true);
+    ok('ppMatches: a cleared slide (no meta) fails a binding',
+       M('L:Top Lower 3rds', {label:'', group:''}) === false && M('L:Top', null) === false);
+    // Forward-compatibility: a look saved by a newer build must not lose elements here.
+    ok('ppMatches: an unknown prefix is treated as unbound, not as "never"',
+       M('Z:whatever', {label:'x'}) === true);
   }
 
   console.log('PP-RESILIENCE RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));

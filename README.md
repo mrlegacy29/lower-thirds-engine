@@ -26,8 +26,26 @@ in-app relay and GitHub-Releases auto-update.
    (and OBS). The Take button reads **ON AIR** (green) when Program matches
    Preview, **TAKE TO AIR** (red) when you have changes to push.
 
-**F1 (Clear All)** in ProPresenter clears everything including the Scripture
-reference list; other clears (F2 / clear-slide) leave the list up.
+**F2 (Clear Slide)** takes the verse off air and leaves the Scripture reference
+list up, entries and all — that's the state you sit in between sermon points.
+**F1 (Clear All)** ends the session: the list empties and its heading goes with
+it. ProPresenter can only tell the two apart when something besides the slide is
+on screen (a background counts), so pick the detection rule under **Connection →
+Clear behavior** and watch the live layer readout while you test.
+
+### Routing by ProPresenter slide label / group
+
+Label a slide in ProPresenter — "Top Lower 3rds", "Bot Lower 3rds", anything you
+like — and bind an element to that label with the dropdown beside its name in
+**Layers** (or the same setting in the inspector). That element only goes on air
+while a slide carrying that label is live, so a verse lands top, the next lands
+bottom, and you never touch the app during service. Bind to a **group** instead
+if you'd rather route a whole section at once.
+
+The dropdown fills itself from whatever presentation is open in ProPresenter —
+labels you add there show up here without reconnecting, and there is nothing to
+retype. Bound elements stay visible in the **Preview** so you can still position
+them; the **Program** monitor and OBS obey the binding.
 
 When a new version is published, the app shows **"Update available → downloading
 → Restart & Install."**
@@ -38,7 +56,7 @@ When a new version is published, the app shows **"Update available → downloadi
 
 ```bash
 npm install      # electron + electron-builder + electron-updater
-npm test         # syntax-check lt.html + 9 jsdom suites  (keep green)
+npm test         # syntax-check lt.html + every jsdom suite  (keep green)
 npm start        # run the app locally
 npm run dist     # build a Windows installer locally -> release\
 ```

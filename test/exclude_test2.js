@@ -49,17 +49,23 @@ const selType=(ty)=>{ const row=[...D.querySelectorAll('.elrow')].find(r=>r.quer
   out.push(['advance: new live verse (Isaiah) hidden from list', !pgList().includes('Isaiah 40:31')]);
   out.push(['advance: Isaiah shows in scripture box', /Isaiah 40:31/.test(scriptureRef()) && !scriptureHidden()]);
 
-  // ============ CLEAR behavior — the list clears whenever the slide is cleared (any clear) ============
+  // ============ CLEAR behavior — F2 (Clear Slide) KEEPS the list, F1 (Clear All) empties it ==
+  // media stays ON = ProPresenter Clear Slide. The verse leaves air; the running list does not.
   slideText=""; slideActive=false; layersObj={slide:false,media:true}; await sleep(700);
-  out.push(['CLEAR: scripture element hidden (opacity 0)', scriptureHidden()]);
-  out.push(['CLEAR empties the ref list', pgList().length===0]);
+  out.push(['F2: scripture element hidden (opacity 0)', scriptureHidden()]);
+  out.push(['F2 KEEPS the ref list', pgList().length>0]);
+  out.push(['F2 keeps the earlier verses', pgList().includes('John 3:16') && pgList().includes('Romans 8:28')]);
+  // exclude-live only hides the verse that is ON SCREEN — once F2 takes it off, it belongs
+  // in the list like any other. This is the whole point of keeping the list up on F2.
+  out.push(['F2: the verse that was live joins the list', pgList().includes('Isaiah 40:31')]);
 
-  // re-populate (exclude-live hides the on-screen verse, the prior remains), then clear again
+  // re-populate (exclude-live hides the on-screen verse, the prior remains), then Clear All
   slideText="Psalm 23:1\nThe Lord is my shepherd."; slideActive=true; layersObj={slide:true,media:true}; await sleep(400);
   slideText="Acts 2:1\nWhen the day of Pentecost."; await sleep(400);
   out.push(['prior verse shows while a new one is live', pgList().includes('Psalm 23:1') && !pgList().includes('Acts 2:1')]);
+  // every visual layer off = Clear All
   slideText=""; slideActive=false; layersObj={slide:false,media:false}; await sleep(700);
-  out.push(['CLEAR empties the list again', pgList().length===0]);
+  out.push(['F1 empties the ref list', pgList().length===0]);
 
   // ---- toggle OFF: F1 should leave it up (exclude turned off so live verse shows in list) ----
   selType('history');

@@ -5,6 +5,10 @@ const { JSDOM } = require('jsdom');
 const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'lt.html'), 'utf8');
 const errors = [];
 let slideText = '', slideActive = true, layersObj = null, sseInst = null, presActive = true;
+// Deck structure + which slide is live, for the ProPresenter label/group binding. Shape
+// copied from a real PP 21.2 response: groups carry `name`, slides carry `label`, and
+// /v1/presentation/slide_index is a FLAT index across every group.
+let deckGroups = null, slideIdx = 0;
 const dom = new JSDOM(html, {
   url: 'http://localhost:7777/output', runScripts: 'dangerously', pretendToBeVisual: true,
   beforeParse(w) {
@@ -14,8 +18,11 @@ const dom = new JSDOM(html, {
     w.Element.prototype.animate = function () { return { cancel() {}, finished: Promise.resolve() }; };
     w.fetch = (u) => {
       const url = String(u);
-      if (/active/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ presentation: presActive ? { id: { uuid: 'x', name: 'Deck', index: 0 } } : null }) });
+      if (/active/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ presentation: presActive ? { id: { uuid: 'x', name: 'Deck', index: 0 }, groups: deckGroups || undefined } : null }) });
       if (/layers/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve(layersObj || { slide: slideActive, media: true }) });
+      // BEFORE the /slide/ arm: "slide_index" contains "slide", so the generic arm would
+      // answer it with a slide-text payload and the index would never resolve.
+      if (/slide_index/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ presentation_index: { index: slideIdx } }) });
       if (/slide/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ current: { text: slideText } }) });
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     };
@@ -61,12 +68,14 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
   ok('second verse logged on output', outList().includes('Romans 8:28'));
 
   // F2 (Clear Slide) as ProPresenter 21.2 actually reports it (measured 2026-08-03):
-  // slide off but MEDIA STILL ON, and presentation cleared. Not a full clear, so the
-  // list clears and the header STAYS. The old fixture modelled this as "presentation
-  // still active", which the real API never does for either clear.
+  // slide off but MEDIA STILL ON, and presentation cleared. Not a full clear, so the verse
+  // leaves air and the list stays up WITH ITS CONTENTS. The old fixture modelled this as
+  // "presentation still active", which the real API never does for either clear.
   slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: true }; await sleep(700);
-  ok('F2: output ref list clears', outList().length === 0);
+  ok('F2: output ref list KEEPS its entries', outList().includes('John 3:16') && outList().includes('Romans 8:28'));
   ok('F2: output header STAYS (media still on -> not a full clear)', outHeadingShown());
+  // The verse itself must still leave air — "keep the list" must not mean "keep everything".
+  ok('F2: the verse is off air', !/Romans 8:28/.test(outRef()));
 
   // re-populate, then F1 (Clear All): presentation cleared -> list clears AND header hides
   slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = { slide: true, media: false }; await sleep(400);
@@ -107,6 +116,64 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
     slideActive = true; presActive = true; layersObj = { slide: true, media: true };
     await sleep(450);
     ok('a song after Clear All does NOT resurrect the empty header', !outHeadingShown());
+  }
+
+  /* ---------- ProPresenter LABEL binding, end to end on the on-air page ----------
+     Brandon labels each slide in ProPresenter ("Top Lower 3rds", "Bot Lower 3rds") and the
+     element bound to that label is the one that goes on air, so one verse lands top and the
+     next lands bottom without touching the app. This drives the REAL path: the fake PP
+     serves a grouped deck plus a flat slide_index, exactly as PP 21.2 does. */
+  {
+    deckGroups = [{ name: 'John 1:1-3', slides: [
+      { label: 'Top Lower 3rds' }, { label: 'Bot Lower 3rds' }, { label: '' } ] }];
+    slideIdx = 0;
+
+    const cfg = W.defaultConfig();
+    const mk = (id, txt, bind) => {
+      const e = W.createElement('text');
+      e.id = id; e.name = txt; e.content = { text: txt }; e.ppMatch = bind;
+      e.source = { kind: 'manual' };          // always has something to say; only the gate can hide it
+      e.anim = Object.assign({}, e.anim, { durIn: 0, durOut: 0 });
+      return e;
+    };
+    cfg.elements = [ mk('t1', 'TOPSLOT', 'L:Top Lower 3rds'),
+                     mk('t2', 'BOTSLOT', 'L:Bot Lower 3rds'),
+                     mk('t3', 'UNBOUND', ''),
+                     mk('t4', 'GROUPSLOT', 'G:John 1:1-3') ];
+    cfg.conn = Object.assign({}, cfg.conn, { host: '127.0.0.1', port: 1025, pollMs: 200 });
+    cfg._take = 30;
+    pushSSE(cfg);
+    slideText = 'John 1:1\nIn the beginning was the Word.';
+    slideActive = true; presActive = true; layersObj = { slide: true, media: true };
+    await sleep(600);
+
+    const air = () => onAirText(D, W, '#out-scaler');
+    ok('bound element matching the live slide label IS on air', /TOPSLOT/.test(air()));
+    ok('bound element for a DIFFERENT label is not', !/BOTSLOT/.test(air()));
+    ok('an unbound element is unaffected by the feature', /UNBOUND/.test(air()));
+    ok('a GROUP binding matches the group the slide sits in', /GROUPSLOT/.test(air()));
+
+    // same deck, next slide: the verse moves to the other position with no operator action
+    slideIdx = 1; slideText = 'John 1:2\nThe same was in the beginning with God.';
+    await sleep(600);
+    ok('advancing to the next label moves the graphic', /BOTSLOT/.test(air()) && !/TOPSLOT/.test(air()));
+    ok('...and the group binding still holds across slides of that group', /GROUPSLOT/.test(air()));
+
+    // an UNLABELLED slide in the same deck: no label binding may match
+    slideIdx = 2; slideText = 'John 1:3\nAll things were made by him.';
+    await sleep(600);
+    ok('an unlabelled slide lights no label-bound element',
+       !/TOPSLOT/.test(air()) && !/BOTSLOT/.test(air()));
+    ok('...while the unbound element stays put', /UNBOUND/.test(air()));
+
+    // Clear All: nothing bound may stay pinned on air
+    slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: false };
+    await sleep(700);
+    ok('Clear All takes every bound element off air',
+       !/TOPSLOT|BOTSLOT|GROUPSLOT/.test(air()));
+
+    deckGroups = null; slideIdx = 0; presActive = true;
+    pushSSE(Object.assign(W.defaultConfig(), { conn: cfg.conn, _take: 31 })); await sleep(200);
   }
 
   // a partial/garbage broadcast must not throw on-air (deepMerge guard)

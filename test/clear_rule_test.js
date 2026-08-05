@@ -36,9 +36,15 @@ const dom = new JSDOM(html, {
 const W = dom.window, D = W.document;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const click = (n) => { if (!n) throw new Error('not found'); n.dispatchEvent(new W.MouseEvent('click', { bubbles: true })); };
+// PAINTED-only, same as output_test — see test/_onair.js. These used to read the raw DOM,
+// which counts chips the engine has taken off air: the reference list element now leaves air
+// entirely once it has no items AND no header to hold, and hide() deliberately keeps the last
+// content in the DOM so the out-animation has something to fade. Reading textContent there
+// reports a cleared list as still populated.
+const { painted } = require('./_onair');
 const pgEl = (sel) => [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector(sel));
-const pgList = () => { const e = pgEl('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].map(t => t.textContent) : []; };
-const pgHeadingShown = () => { const w = [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector('.h-label')); const h = w && w.querySelector('.h-label'); return !!h && h.style.display !== 'none'; };
+const pgList = () => { const e = pgEl('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].filter(t => painted(t, W, D)).map(t => t.textContent) : []; };
+const pgHeadingShown = () => { const w = [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector('.h-label')); const h = w && w.querySelector('.h-label'); return !!h && h.style.display !== 'none' && painted(h, W, D); };
 const btnByText = (re) => [...D.querySelectorAll('button')].find(b => re.test(b.textContent));
 const selType = (ty) => { const row = [...D.querySelectorAll('.elrow')].find(r => r.querySelector('.ty') && r.querySelector('.ty').textContent === ty); if (row) click(row.querySelector('.nm')); };
 const VERSE = { slide: true, media: true, props: false, messages: false, announcements: false, audio: false, video_input: false };
@@ -71,18 +77,20 @@ let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL
   ok('header shown while the list has items', pgHeadingShown());
 
   // F2 (Clear Slide) as ProPresenter actually reports it: slide off, MEDIA STILL ON,
-  // presentation cleared. Not a full clear -> the header stays.
+  // presentation cleared. Not a full clear -> the verse leaves air and the list stays,
+  // contents and all. This is the state the operator sits in between sermon points.
   const CLEAR_SLIDE = Object.assign({}, ALL_OFF, { media: true });
   slideText = ''; slideActive = false; presActive = false; layersObj = Object.assign({}, CLEAR_SLIDE); await sleep(700);
-  ok('F2: list CLEARS', pgList().length === 0);
+  ok('F2: list SURVIVES with its entries', pgList().includes('John 3:16') && pgList().includes('Romans 8:28'));
   ok('F2: header STAYS up (media still on -> not a full clear)', pgHeadingShown());
 
-  // THE BARE-PLATE STATE: chips gone, header still up. This is what sits on air through a
-  // worship set after an F2, and "Clear scripture list now" is the only control offered to
-  // remove it — so it has to actually remove it. Asserting this AFTER a full clear (where
-  // the header is already down) passes whether or not the button works.
+  // "Clear scripture list now" is the operator's manual override, and after an F2 there is
+  // now a POPULATED list to clear — so it has to take both the chips and the header down.
+  // Asserting this after a full clear (where both are already down) passes whether or not
+  // the button works.
   click(btnByText(/Clear scripture list now/i)); await sleep(700);
-  ok('manual Clear list drops a bare header left up by F2', !pgHeadingShown());
+  ok('manual Clear list empties a list left up by F2', pgList().length === 0);
+  ok('manual Clear list drops the header too', !pgHeadingShown());
 
   // re-populate, then F1 (Clear All): presentation cleared
   slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = Object.assign({}, VERSE); await sleep(400);

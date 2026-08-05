@@ -193,6 +193,15 @@
   .elrow.sel{border-color:var(--pv);background:#16263a}
   .elrow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
   .elrow .ty{font-size:10px;color:var(--faint);font-family:var(--mono);text-transform:uppercase}
+  /* ProPresenter label/group binding. max-width keeps a long label from squeezing the
+     name out of the row — the full text is still in the dropdown and the tooltip. */
+  .elrow .ppbind{flex:none;width:104px;max-width:104px;height:26px;padding:0 6px;font-size:11px;
+    border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--muted);
+    font-family:var(--mono);text-overflow:ellipsis}
+  .elrow .ppbind:hover{border-color:#46566a;color:var(--ink)}
+  /* Bound AND the live slide matches = this is what would be on air right now. */
+  .elrow.ppon .ppbind{color:var(--ok);border-color:#2c5740;background:rgba(48,209,88,.08)}
+  .elrow.ppoff .ppbind{opacity:.62}
   .ic{width:28px;height:26px;display:inline-flex;align-items:center;justify-content:center;flex:none;
     border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--muted);
     font-size:12px;padding:0;transition:border-color .15s,color .15s,background .15s}
@@ -525,6 +534,9 @@ function createElement(type){
     layout:{x:120,y:820,w:1100,h:180},
     box:boxDefaults(), anim:animDefaults(), loop:loopDefaults(),
     layer:0, yieldTo:false, vis:"auto", visWith:"",
+    // ProPresenter binding: "" = every slide, "L:<label>" / "G:<group>" = only while the
+    // live slide carries that label / sits in that group. See ppMatches().
+    ppMatch:"",
     dock:{on:false,to:"",x:120,y:820,w:620,h:160},
     content:{}, style:{}, source:{kind:"manual"} };
   if(type==="scripture"){
@@ -1681,6 +1693,38 @@ function flattenGroups(pres){
   });
   return out;
 }
+/* The distinct slide LABELS and GROUP names in a flattened deck, in deck order.
+   This is what fills the per-element "only on this label" dropdown, so the operator
+   picks from the list ProPresenter is actually showing instead of retyping it here.
+   Measured on PP 21.2: there is NO endpoint that exposes the app's Slide-Labels
+   library (/v1/labels, /v1/slide_labels, /v1/status/labels all 404) — the only place
+   a slide label is readable is inside /v1/presentation/active, so the live deck is
+   the source. /v1/groups DOES exist and returns the global GROUP library. */
+function deckLib(flat){
+  const labels=[],groups=[],sl=new Set(),sg=new Set();
+  (Array.isArray(flat)?flat:[]).forEach(s=>{
+    const l=String((s&&s.label)||"").trim(), g=String((s&&s.group)||"").trim();
+    if(l&&!sl.has(l)){ sl.add(l); labels.push(l); }
+    if(g&&!sg.has(g)){ sg.add(g); groups.push(g); }
+  });
+  return {labels,groups};
+}
+/* Does this element's ProPresenter binding match the live slide?
+   "" = unbound (every slide). "L:<name>" = only while the live slide carries that
+   LABEL; "G:<name>" = only while it sits in that GROUP. Compared trimmed and
+   case-insensitively, because a label retyped in ProPresenter rarely matches the
+   stored one byte-for-byte. An unknown prefix is treated as unbound rather than as
+   "never show" — a look from a newer build must not silently lose an element. */
+function ppMatches(bind,meta){
+  const b=String(bind||"").trim();
+  if(!b) return true;
+  const norm=(s)=>String(s||"").trim().toLowerCase();
+  const want=norm(b.slice(2)), m=meta||{};
+  if(!want) return true;
+  if(b.slice(0,2)==="L:") return norm(m.label)===want;
+  if(b.slice(0,2)==="G:") return norm(m.group)===want;
+  return true;
+}
 function createPP(opts){
   let host,port,pollMs,timer=null,running=false,lastKey="",lastSigKey="",supportsLayers=true;
   let lastActive=null,lastAllClr=null,lastLayers=null,lastPres=null;
@@ -1693,7 +1737,7 @@ function createPP(opts){
   // ProPresenter GROUP / slide LABEL of whatever is live. These let a look route by
   // "which group is this verse in" instead of only "is something live" — one scripture
   // element per screen position, chosen by the group the operator built in PP.
-  let presUid=null, presFlat=[], slideGroup="", slideLabel="";
+  let presUid=null, presFlat=[], presSig="", slideGroup="", slideLabel="";
   // A layers payload we don't recognise used to latch layer support off for the
   // whole session on ONE bad read (a {} body, a 200-with-error, a PP hiccup), and
   // clear detection never came back. Require several in a row.
@@ -1745,8 +1789,25 @@ function createPP(opts){
           // rebuilt when the deck actually changes, not 5x a second.
           const pres=pd.presentation;
           const puid=(pres&&pres.id&&pres.id.uuid)||null;
-          if(puid && puid!==presUid){ presUid=puid; presFlat=flattenGroups(pres); }
-          else if(!puid){ presUid=null; presFlat=[]; }
+          // Re-flatten whenever the deck's SHAPE changes, not just when its uuid does.
+          // Keying on uuid alone meant that adding or renaming a slide label in
+          // ProPresenter while the deck stayed open was invisible here until the operator
+          // switched presentations or reconnected — which is exactly what someone does
+          // when they are in the middle of setting these labels up. Flattening is a walk
+          // over groups/slides, far cheaper than the JSON parse that already happens on
+          // every tick, so the uuid is now only a fast path.
+          if(!puid){ presUid=null; presFlat=[]; presSig=""; }
+          else{
+            const flat=flattenGroups(pres);
+            const sig=puid+"|"+flat.map(s=>s.group+""+s.label).join("");
+            if(sig!==presSig){
+              presSig=sig; presUid=puid; presFlat=flat;
+              // Hand the deck's labels/groups to the console so the per-element dropdown
+              // offers exactly what ProPresenter is showing. Contained: a UI throw must
+              // never stop the feed.
+              try{ opts.onDeck && opts.onDeck(deckLib(presFlat)); }catch(e){}
+            }
+          }
         }
       }catch(e){ /* transient — hold last */ }
       if(!running || myGen!==gen) return;
@@ -1804,10 +1865,28 @@ function createPP(opts){
       if(running && myGen===gen) timer=setTimeout(()=>tick(myGen),pollMs);
     }
   }
+  /* ProPresenter's GLOBAL group library (Verse, Chorus, Bridge, plus anything the
+     operator added). Verified present on PP 21.2; older builds 404, in which case the
+     dropdown simply falls back to the groups found in the live deck. Fetched once per
+     connect — it is a preferences list, not live state. */
+  async function loadLibrary(myGen){
+    try{
+      const r=await ppGet("/v1/groups");
+      if(!running || myGen!==gen || !r.ok) return;
+      const j=await r.json();
+      const arr=Array.isArray(j)?j:(Array.isArray(j&&j.data)?j.data:[]);
+      const groups=arr.map(g=>String((g&&g.id&&g.id.name)||(g&&g.name)||"").trim()).filter(Boolean);
+      if(groups.length) opts.onDeck && opts.onDeck({labels:[],groups});
+    }catch(e){ /* optional enrichment — never let it affect the feed */ }
+  }
   return {
     connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;unknownLayers=0;
       lastKey="";lastSigKey="";lastActive=null;lastAllClr=null;lastLayers=null;lastPres=null;
-      const myGen=++gen; tick(myGen); },
+      // A reconnect must re-offer the deck's labels: presSig is what suppresses a repeat
+      // fire, and without clearing it a fresh connect to the same deck would leave the
+      // dropdown empty until the operator changed presentations.
+      presUid=null; presFlat=[]; presSig="";
+      const myGen=++gen; tick(myGen); loadLibrary(myGen); },
     stop(){ running=false; gen++; if(timer){clearTimeout(timer);timer=null;} },
     setWantTimers(b){ wantTimers=!!b; },
     layersSupported(){return supportsLayers;}
@@ -2360,11 +2439,15 @@ function createStage(scaler,opts){
       let items=history;
       if(d.excludeLive && live && live.ref){ items=history.slice();
         while(items.length && items[items.length-1].ref===live.ref) items.pop(); }
-      // DELIBERATELY always active. An audit flagged that an empty list with a styled
-      // background can leave a blank plate on air, but hiding the whole element here
-      // breaks the tuned Clear-Slide/Clear-All header behaviour (headerHold) — the
-      // header is already managed by setText, which is the intended mechanism.
-      // If the blank plate ever matters, style the BACKGROUND off, don't hide here.
+      // Nothing to say AND no header to hold = leave air entirely. The tuned Clear-Slide /
+      // Clear-All behaviour is preserved because headerHold is exactly the flag that is
+      // still true through a Clear Slide (F2) and false after a Clear All (F1) — so F2
+      // keeps the plate up with its references, and F1 takes the whole thing off. This
+      // used to return early unconditionally, which was safe only while the list also
+      // emptied on F2 and the default box happens to be transparent; with the list now
+      // PERSISTING through F2, a styled background would have ridden on air empty for the
+      // rest of the service after F1. Still shown in the builder so it can be positioned.
+      if(!items.length && !headerHold && !interactive) return null;
       return {items,headerHold};
     }
     if(d.type==="eventList"){ const lines=String(subVars(d.content||{}).items||"").split("\n").map(s=>s.trim()).filter(Boolean);
@@ -2431,8 +2514,22 @@ function createStage(scaler,opts){
   }
   const LOWER_TYPES={scripture:1,reference:1,name:1,sermonTitle:1,bulletList:1,text:1};
   function byId(id){ return (cfg&&cfg.elements||[]).find(e=>e&&e.id===id)||null; }
+  /* A per-element binding to a ProPresenter slide LABEL or GROUP: the operator files the
+     slide under "Top Lower 3rds" in ProPresenter and the element bound to that label is the
+     one that goes on air. This is a pure GATE — it can only keep something off, never force
+     it on — so it composes with rules and with the element's own visibility instead of
+     fighting them.
+     Deliberately inert in the interactive builder: the element has to stay on screen there
+     to be dragged, sized and styled, and the operator is usually building the look with
+     nothing live at all. The Program monitor is non-interactive, so it still shows exactly
+     what OBS is showing. Same precedent as the QR element's unscannable-payload gate. */
+  function ppGateOk(d){
+    if(interactive) return true;
+    return ppMatches(d&&d.ppMatch, slideMeta);
+  }
   function activeBase(d){
     if(!d || d.visible===false) return false;
+    if(!ppGateOk(d)) return false;
     // A rule takes precedence over the element's own visibility mode, but NOT over
     // the operator's eye toggle above — hiding something by hand must always win.
     if(ruleState && Object.prototype.hasOwnProperty.call(ruleState,d.id)){
@@ -2628,6 +2725,11 @@ function createStage(scaler,opts){
     // entrance on an EMPTY box for every type it did not special-case (a Timer/clock most
     // visibly, since its text is computed here rather than stored on the element).
     contentFor:(d)=>{ try{ return contentFor(d); }catch(e){ return null; } },
+    // The group/label of whatever ProPresenter has live right now. The Layers list reads it
+    // to mark which bound elements the current slide would actually put on air — the builder
+    // preview deliberately shows bound elements regardless (see ppGateOk), so without this
+    // the operator has no way to tell a matching binding from a stale one.
+    slideMeta:()=>({group:slideMeta.group,label:slideMeta.label}),
     get cfg(){return cfg;}, getRenderer:(id)=>renderers.get(id) };
 }
 
@@ -2669,7 +2771,14 @@ if(isOutput){
     if(!text){
       // fallback must match defaultConfig — "pres" cannot tell the two clears apart at all
       const full=isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
-      if(histWantsClear()){ history.length=0; stage.setHistory(history); }   // list clears on any clear (Clear Slide or Clear All)
+      // ONLY a full clear empties the list. This used to wipe on EVERY clear, which meant a
+      // Clear Slide (F2) — the normal "take the verse off air between points" keystroke —
+      // left the header up over an EMPTY plate, and every reference built up during the
+      // sermon was gone. F2 now takes the verse off and leaves the running list exactly as
+      // it was; F1 (Clear All) ends the session and takes the list with it. That is also
+      // what the element's own toggle has always said ("Clear this list on ProPresenter
+      // Clear All (F1)") and what the panel hint promised — the code was the odd one out.
+      if(full && histWantsClear()){ history.length=0; stage.setHistory(history); }
       if(full) everShown=false;                                // a full clear ends the session
       stage.setHeaderHold(everShown && !full);                 // hold the header on a Clear Slide, hide it on a Clear All
       stage.setLive(null); return;
@@ -2878,6 +2987,8 @@ if(!isOutput){
     else { liveData={ref:"",body:text.trim(),translation:"",rawText:text.trim()}; }
     pgStage.setSlideMeta((signals&&signals.group)||"",(signals&&signals.label)||"");
     pvStage.setSlideMeta((signals&&signals.group)||"",(signals&&signals.label)||"");
+    // Cheap class flip on the Layers rows — see refreshPpRows for why this is not renderPanels.
+    if(typeof refreshPpRows==="function") refreshPpRows();
     pgStage.setLive(liveData); setTally({el:$("pgTitle")}, !!liveData);
     if(liveMode){ pvStage.setLive(liveData); setTally(pvMonTally,!!liveData); }
     if(sc&&sc.ref)pushLog(sc.ref);                               // log AFTER setLive (clean exclude-live)
@@ -2891,7 +3002,10 @@ if(!isOutput){
     if(!text){
       const _pgFull=isFullClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
       const _pvFull=isFullClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
-      if(historyWantsClear(program)) clearLog();
+      // Gated on the PROGRAM full-clear for the same reason logEverShown is (below): the
+      // console's list is the twin of the OBS output's, and the output keys off program.conn
+      // alone. See the output-page onSlide for why only a FULL clear may empty it.
+      if(_pgFull && historyWantsClear(program)) clearLog();
       // Reset on the PROGRAM rule alone. logEverShown is the console's twin of the output
       // page's everShown, and the output page keys off program.conn only — so requiring
       // BOTH meant that the moment Preview's clear rule differed from Program's (an
@@ -2912,7 +3026,44 @@ if(!isOutput){
     $("opSlideTxt")&&($("opSlideTxt").textContent=text?(text.length>34?text.slice(0,34)+"\u2026":text):"(clear)");
     const air=$("opAir"); if(air){ air.classList.toggle("live",on); const at=$("opAirTxt"); if(at)at.textContent=on?"ON AIR":"STANDBY"; }
   }
-  const pp=createPP({onUpdate:onSlide, onSignals:(s)=>renderClearDiag(s),
+  /* ---- ProPresenter label / group library (fills the per-element binding dropdown) ----
+     Union of every label and group seen since install, most-recent deck FIRST. It has to
+     accumulate rather than mirror the live deck: the operator builds a look for next
+     Sunday's sermon deck while this morning's is still open, and a binding whose label
+     vanished from the dropdown looks broken even though it still works. */
+  const LS_PPLIB="pplt.pplib.v1";
+  let ppLib={labels:[],groups:[]};
+  try{ const r=JSON.parse(localStorage.getItem(LS_PPLIB)||"{}");
+    ppLib={labels:Array.isArray(r.labels)?r.labels.filter(x=>typeof x==="string"):[],
+           groups:Array.isArray(r.groups)?r.groups.filter(x=>typeof x==="string"):[]};
+  }catch(e){ /* corrupt/absent — start empty, the live deck refills it in one poll */ }
+  // Every select built by the Layers list registers a repaint here. A full renderPanels()
+  // would have been simpler and is wrong: the deck signature changes the moment the
+  // operator edits a label in ProPresenter, and rebuilding the whole panel then would
+  // blow away the field they are typing in and the section they have open.
+  let _ppSelRepaint=[];
+  function ppLibMerge(inc){
+    if(!inc) return;
+    let grew=false;
+    // Newest first: the deck just opened is the one being labelled right now, so its
+    // entries belong at the top of the list rather than buried under months of history.
+    const add=(arr,list)=>{ (Array.isArray(arr)?arr:[]).slice().reverse().forEach(v=>{
+      const s=String(v||"").trim(); if(!s) return;
+      const i=list.findIndex(x=>x.toLowerCase()===s.toLowerCase());
+      if(i===0) return;                       // already at the front, nothing to do
+      if(i>0) list.splice(i,1);               // seen before — just promote it
+      else grew=true;                         // genuinely new; only this repaints the selects
+      list.unshift(s);
+    }); };
+    add(inc.labels,ppLib.labels); add(inc.groups,ppLib.groups);
+    // Cap it. This is an append-only list fed by every deck ever opened on a machine that
+    // runs every week — unbounded, it would grow forever and make the dropdown useless.
+    if(ppLib.labels.length>120) ppLib.labels.length=120;
+    if(ppLib.groups.length>120) ppLib.groups.length=120;
+    try{ localStorage.setItem(LS_PPLIB,JSON.stringify(ppLib)); }catch(e){}
+    if(grew) _ppSelRepaint.forEach(fn=>{ try{ fn(); }catch(e){} });
+  }
+  const pp=createPP({onUpdate:onSlide, onSignals:(s)=>renderClearDiag(s), onDeck:ppLibMerge,
     // Live timers feed BOTH monitors so a mirrored PP countdown previews correctly.
     onTimers:(t)=>{ pvStage.setTimers(t); pgStage.setTimers(t); },
     onReach:(ok)=>{ const dot=$("connDot"); if(dot)dot.className="dot "+(ok?"ok":"err");
@@ -3037,9 +3188,46 @@ if(!isOutput){
     d.append(sm,b); return d;
   }
 
+  /* One element's ProPresenter binding, as it appears beside the name in the Layers list.
+     Repaints itself in place when a new deck brings new labels in, so the operator can add
+     a label in ProPresenter and pick it here without reopening anything. */
+  function ppBindSelect(d){
+    const s=el("select",{class:"ppbind"});
+    const paint=()=>{
+      const cur=String(d.ppMatch||"");
+      s.textContent="";
+      s.append(el("option",{value:"",text:"Any slide"}));
+      const grp=(lbl,vals,pfx)=>{
+        if(!vals.length) return;
+        const og=el("optgroup"); og.label=lbl;
+        vals.forEach(v=>og.append(el("option",{value:pfx+v,text:v})));
+        s.append(og);
+      };
+      grp("Slide labels",ppLib.labels,"L:");
+      grp("Groups",ppLib.groups,"G:");
+      // A binding whose label is not in the library yet — a look imported from another
+      // machine, or one saved before this deck was ever opened here — must still show
+      // what it is bound to. Without this the select falls back to the first option and
+      // SILENTLY REPORTS "Any slide" for an element that is in fact gated.
+      if(cur && !Array.prototype.some.call(s.querySelectorAll("option"),o=>o.value===cur)){
+        const og=el("optgroup"); og.label="Not in the current deck";
+        og.append(el("option",{value:cur,text:cur.slice(2)||cur}));
+        s.append(og);
+      }
+      s.value=cur;
+    };
+    paint();
+    _ppSelRepaint.push(paint);
+    s.title="Only put this on air when ProPresenter's live slide carries this label / group";
+    s.onclick=(e)=>e.stopPropagation();      // the row itself selects the element
+    s.onchange=()=>{ d.ppMatch=s.value; applyPreview(); renderPanels(); };
+    return s;
+  }
   /* ---- layers list ---- */
   function secLayers(){
     preview.elements=preview.elements.filter(Boolean);   // never render holes
+    _ppSelRepaint=[];                 // the old closures point at DOM that is about to go
+    const meta=(typeof pgStage.slideMeta==="function")?pgStage.slideMeta():{group:"",label:""};
     const list=el("div",{class:"ellist"});
     if(!preview.elements.length) list.append(el("div",{class:"empty",text:"No elements yet. Add one below."}));
     preview.elements.forEach((d,idx)=>{
@@ -3070,12 +3258,31 @@ if(!isOutput){
           preview.elements.splice(i,1);
           releaseRefsTo(d.id);      // or anything linked/docked to it is hidden forever
           if(selectedId===d.id)selectedId=preview.elements[0]?preview.elements[0].id:null; applyPreview();renderPanels();}},"danger");
-      row.append(eye,nm,up,dn,del); list.append(row);
+      row.setAttribute("data-el",d.id);   // so refreshPpRows can find it without a rebuild
+      const bind=ppBindSelect(d);
+      // The builder preview deliberately keeps a bound element on screen so it can still be
+      // positioned (see ppGateOk), so the ONLY signal that a binding is live is here. Green
+      // = the slide ProPresenter has up right now would put this on air.
+      if(d.ppMatch) row.classList.add(ppMatches(d.ppMatch,meta)?"ppon":"ppoff");
+      row.append(eye,nm,bind,up,dn,del); list.append(row);
     });
     const add=el("div",{class:"addmenu"});
     ADD_TYPES.forEach(t=>add.append(el("button",{class:"btn tiny",text:"+ "+TYPE_LABELS[t],
       onclick:()=>{ const ne=createElement(t); preview.elements.push(ne); selectedId=ne.id; applyPreview(); renderPanels(); }})));
     return section("Layers  ("+preview.elements.length+")",[list,add],true,"layers");
+  }
+  /* Repaint the Layers rows' bound/live markers from whatever slide is up NOW. Called on
+     every slide change, so it must not rebuild the panel — that would close the operator's
+     open sections and steal focus from a field they are typing in, 5 times a second while
+     ProPresenter is being clicked through. */
+  function refreshPpRows(){
+    const meta=(typeof pgStage.slideMeta==="function")?pgStage.slideMeta():{group:"",label:""};
+    document.querySelectorAll(".elrow[data-el]").forEach(row=>{
+      const d=(preview.elements||[]).find(e=>e&&e.id===row.getAttribute("data-el"));
+      const on=!!(d&&d.ppMatch)&&ppMatches(d.ppMatch,meta);
+      row.classList.toggle("ppon",!!(d&&d.ppMatch)&&on);
+      row.classList.toggle("ppoff",!!(d&&d.ppMatch)&&!on);
+    });
   }
   function moveEl(id,dir){ const a=preview.elements; const idx=a.findIndex(e=>e&&e.id===id); if(idx<0)return;
     const j=idx+dir; if(j<0||j>=a.length)return; [a[idx],a[j]]=[a[j],a[idx]]; applyPreview(); renderPanels(); }
@@ -3314,6 +3521,24 @@ if(!isOutput){
                            :el("p",{class:"hint",text:"Add another element first to link this one to it."}));
     if((d.vis||"auto")==="always")
       rows.push(el("p",{class:"hint",text:"Stays on screen through scripture changes \u2014 won't re-animate. Perfect for a logo or watermark."}));
+
+    // The same binding as the dropdown in the Layers list, spelled out. Both write d.ppMatch
+    // and both call renderPanels(), so they cannot drift apart.
+    rows.push(el("div",{class:"gh",text:"ProPresenter slide label / group"}));
+    {
+      const bindOpts=[["","Any slide (no binding)"]]
+        .concat(ppLib.labels.map(v=>["L:"+v,"Label: "+v]))
+        .concat(ppLib.groups.map(v=>["G:"+v,"Group: "+v]));
+      const cur=String(d.ppMatch||"");
+      // Same reason as the Layers select: never let an unknown binding be silently
+      // reported as "Any slide".
+      if(cur && !bindOpts.some(o=>o[0]===cur)) bindOpts.push([cur,(cur.slice(0,2)==="G:"?"Group: ":"Label: ")+cur.slice(2)+"  (not in the current deck)"]);
+      rows.push(rowSelect("Only on air when the live slide is",cur,bindOpts,(v)=>{d.ppMatch=v;onCh();renderPanels();}));
+      rows.push(el("p",{class:"hint",text:ppLib.labels.length||ppLib.groups.length
+        ? "Label a slide in ProPresenter and bind an element to it \u2014 that verse then lands in this element's position. The list above is read live from ProPresenter; the builder preview always shows the element so you can still place it, the Program monitor and OBS obey the binding."
+        : "Connect to ProPresenter (Connection panel) and the labels and groups from your open presentation appear here automatically \u2014 there is nothing to retype."}));
+    }
+
     rows.push(el("div",{class:"gh",text:"Layering"}));
     rows.push(rowSelect("Stacking layer",String(d.layer||0),[["-5","Behind (under lower-thirds)"],["0","Normal"],["10","On top of everything"]],(v)=>{d.layer=parseInt(v,10)||0;onCh();}));
     rows.push(rowToggle("Yield: drop beneath an overlapping scripture / lower-third",!!d.yieldTo,(v)=>{d.yieldTo=v;onCh();}));
@@ -3463,7 +3688,7 @@ if(!isOutput){
               rowSelect("Order",c.order,[["new","Newest first"],["old","Oldest first"]],(v)=>{c.order=v;onCh();})),
         rowToggle("Show only prior verses (hide the one on screen now)",!!d.excludeLive,(v)=>{d.excludeLive=v;onCh();}),
         rowToggle("Clear this list on ProPresenter Clear All (F1)",d.clearOnAll!==false,(v)=>{d.clearOnAll=v;onCh();}),
-        el("p",{class:"hint",text:"F1 (Clear All) empties this list; F2 / clear-slide leaves it up. Note: ProPresenter only distinguishes the two when something besides the slide is on screen (e.g. a background layer)."}),
+        el("p",{class:"hint",text:"F2 / Clear Slide takes the verse off air and leaves this list up, contents and all. F1 (Clear All) empties it and drops the heading. Note: ProPresenter only distinguishes the two when something besides the slide is on screen (e.g. a background layer) — see Clear Behavior."}),
         el("div",{class:"gh",text:"List transition"}),
         split(rowSelect("Add animation",d.histAnim||"slide-up",[["slide-up","Slide up"],["roll-up","Roll up"],["fade","Fade"],["slide-side","Slide in (side)"],["none","Instant"]],(v)=>{d.histAnim=v;onCh();}),
               rowRange("Speed (ms)",d.histDur!=null?d.histDur:450,0,1500,20,"",(v)=>{d.histDur=v;onCh();})),
@@ -3596,7 +3821,7 @@ if(!isOutput){
         statLine("Clear detect","stLayer","\u2014")]),
       el("p",{class:"hint",html:"<b>Clear detect</b> reads ProPresenter's slide layer so F1/F2/clear actually hides the graphic. If it shows <i>n/a (text mode)</i>, your build didn't return layer status \u2014 it falls back to empty-text detection."}),
       el("div",{class:"grp"},[el("div",{class:"gh",text:"Clear behavior \u2014 Previously-Referenced list"}),
-        el("p",{class:"hint",html:"The list clears whenever you clear the slide. The <b>header</b> stays through <b>Clear Slide (F2)</b> but disappears on <b>Clear All</b>. Pick how the app detects a full Clear All, and watch the live signals as you test."}),
+        el("p",{class:"hint",html:"<b>Clear Slide (F2)</b> takes the verse off air and leaves the list up. <b>Clear All (F1)</b> empties it and drops the header. Everything below is how the app tells those two apart — pick a rule and watch the live signals as you test."}),
         rowSeg("Detect a full Clear All by",cn.clearRule||"all",
           [["pres","Presentation cleared"],["all","All layers off"],["layer","A layer turns off"],["manual","Never (manual only)"]],
           // _ruleMig2 as well as _ruleMig: without it, an operator who picks "pres" here
@@ -3611,7 +3836,7 @@ if(!isOutput){
         (function(){ const n=el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"});
           setTimeout(()=>{ try{ renderClearDiag(); }catch(e){} },0); return n; })(),
         el("div",{class:"row"},[el("button",{class:"btn sm full",text:"Clear scripture list now",onclick:()=>{manualClearList();}})]),
-        el("p",{class:"hint",html:"<b>All layers off</b> (recommended) keeps the header up on Clear Slide and removes it on Clear All. Measured on ProPresenter 21.2: Clear Slide leaves <i>media</i> on, Clear All turns everything off — while <i>presentation</i> reports cleared for <b>both</b>, so “Presentation cleared” cannot tell them apart on that build. Use it only if the live readout above shows otherwise on your rig. Changes reach the OBS output after the next <b>Take</b>."})
+        el("p",{class:"hint",html:"<b>All layers off</b> (recommended) keeps the list up on Clear Slide and removes it on Clear All. Measured on ProPresenter 21.2: Clear Slide leaves <i>media</i> on, Clear All turns everything off — while <i>presentation</i> reports cleared for <b>both</b>, so “Presentation cleared” cannot tell them apart on that build. Use it only if the live readout above shows otherwise on your rig. Changes reach the OBS output after the next <b>Take</b>."})
       ])
     ],false,"conn");
   }
