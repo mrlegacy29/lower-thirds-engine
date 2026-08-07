@@ -33,19 +33,41 @@ it. ProPresenter can only tell the two apart when something besides the slide is
 on screen (a background counts), so pick the detection rule under **Connection →
 Clear behavior** and watch the live layer readout while you test.
 
-### Routing by ProPresenter slide label / group
+### Routing by ProPresenter group (or slide label)
 
-Label a slide in ProPresenter — "Top Lower 3rds", "Bot Lower 3rds", anything you
-like — and bind an element to that label with the dropdown beside its name in
+Name a position in ProPresenter — "Top Lower 3rds", "Bot Lower 3rds", whatever
+you like — then bind an element to it with the dropdown beside its name in
 **Layers** (or the same setting in the inspector). That element only goes on air
-while a slide carrying that label is live, so a verse lands top, the next lands
-bottom, and you never touch the app during service. Bind to a **group** instead
-if you'd rather route a whole section at once.
+while a slide filed under that name is live, so one verse lands top, the next
+lands bottom, and you never touch the app during a service.
 
-The dropdown fills itself from whatever presentation is open in ProPresenter —
-labels you add there show up here without reconnecting, and there is nothing to
-retype. Bound elements stay visible in the **Preview** so you can still position
-them; the **Program** monitor and OBS obey the binding.
+**Use Groups.** ProPresenter publishes its whole **Settings → Groups** library
+over its API, so a custom group you create there appears in the dropdown the
+moment the app connects — before you have opened a single presentation. Slide
+labels work identically, but ProPresenter does **not** publish its Slide Labels
+library, so a label only appears here once the app has seen a deck carrying it.
+
+The dropdown fills itself: the Groups library on connect, plus the groups and
+labels of whatever deck ProPresenter has open — it does not have to be on screen,
+so you can set up next Sunday's deck without presenting it. Anything it has ever
+seen is remembered. If something is still missing, pick **Type a label…** at the
+bottom of the list and type it; matching ignores case and stray spaces.
+
+Bound elements stay visible in the **Preview** so you can still position them;
+the **Program** monitor and OBS obey the binding.
+
+### Logo / slogan layer
+
+Add a **Logo / Slogan** layer for a church logo, ministry name or strapline. It
+rides above the lower thirds and is deliberately outside ProPresenter's reach —
+**F1 / Clear All will not take it down.** It carries text, a slogan line, and an
+image or MP4 (drop a PNG in *Background image / video* and leave the text blank
+for a plain logo bug).
+
+Because nothing in ProPresenter can clear it, the only thing that does is the
+**Logo / Slogan** row under the monitors. Those buttons go straight to air on
+click — no Take needed — and read **● ON AIR** or **○ off** so there is never any
+doubt about what is up.
 
 When a new version is published, the app shows **"Update available → downloading
 → Restart & Install."**

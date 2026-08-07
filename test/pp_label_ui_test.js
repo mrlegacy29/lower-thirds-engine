@@ -48,6 +48,16 @@ const SEED = makeSeedElement();
 const errors = [];
 let slideText = 'John 1:1\nIn the beginning was the Word.', slideActive = true;
 let slideIdx = 0, deckGroups = DECK, deckUuid = 'deck-1', presActive = true;
+// A SECOND deck — the one ProPresenter merely has open in its editor. Its labels have to
+// reach the dropdown without it ever being presented; otherwise configuring a look for next
+// Sunday's sermon means putting that deck on screen in front of the congregation.
+// Deliberately does NOT contain the word "focused": these fake arms match on bare substrings
+// (the relay URL-encodes the path into a ?target= query, so a slash-bearing regex can never
+// match), and a uuid containing "focused" was swallowed by the pointer arm below — the deck
+// fetch came back as a bare {uuid,name} with no groups and the feature looked broken.
+const FOCUS_UUID = 'deck-2-open';
+let focusedUuid = null, focusedGroups = [{ name: 'Sermon Points', slides: [
+  { label: 'Point One' }, { label: 'Point Two' } ] }];
 
 const dom = new JSDOM(html, {
   url: 'http://localhost:7777/', runScripts: 'dangerously', pretendToBeVisual: true,
@@ -70,6 +80,17 @@ const dom = new JSDOM(html, {
       // arm answers it with a text payload and the index never resolves.
       if (/slide_index/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ presentation_index: { index: slideIdx } }) });
       if (/slide/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ current: { text: slideText } }) });
+      // The deck ProPresenter has OPEN. /focused is a tiny pointer; the deck itself comes
+      // from /v1/presentation/<uuid>. Matched on the bare words because the app addresses
+      // ProPresenter through the relay, which URL-ENCODES the path into a ?target= query —
+      // a regex containing a slash would never match here.
+      // uuid arm FIRST — a real ProPresenter uuid is a hex GUID, but keeping the specific
+      // match ahead of the generic one is what stops a fixture rename from silently
+      // re-breaking this.
+      if (url.indexOf(FOCUS_UUID) >= 0) return Promise.resolve({ ok: true, json: () => Promise.resolve(
+        { presentation: { id: { uuid: FOCUS_UUID, name: 'Next Sunday' }, groups: focusedGroups } }) });
+      if (/focused/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve(
+        focusedUuid ? { uuid: focusedUuid, name: 'Next Sunday', index: 1 } : {}) });
       // The GLOBAL group library. Present on PP 21.2; older builds 404 and the dropdown
       // then falls back to the groups found in the live deck.
       if (/groups/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve(
@@ -175,6 +196,86 @@ const pvText = () => { const root = D.getElementById('pv-scaler'); if (!root) re
     await sleep(700);
     ok('a label added in ProPresenter appears without reconnecting',
        optVals(bindOf('Ghost')).indexOf('L:Centre Lower 3rds') >= 0);
+  }
+
+  /* ---- a deck ProPresenter merely has OPEN also fills the dropdown ----
+     Verified against PP 21.2: /v1/presentation/focused returns the selected deck whether or
+     not it is being presented. Without this you had to put a deck on screen to configure a
+     look for it. */
+  {
+    const before = optVals(bindOf('Ghost'));
+    ok('an un-presented deck contributes nothing until it is focused',
+       before.indexOf('L:Point One') < 0);
+    focusedUuid = FOCUS_UUID;
+    await sleep(3000);                       // the focused poll runs ~every 10 ticks
+    const after = optVals(bindOf('Ghost'));
+    ok('selecting a deck in ProPresenter surfaces its labels — no need to present it',
+       after.indexOf('L:Point One') >= 0 && after.indexOf('L:Point Two') >= 0);
+    ok('...and its group as well', after.indexOf('G:Sermon Points') >= 0);
+    ok('the LIVE deck\'s labels are still there', after.indexOf('L:Top Lower 3rds') >= 0);
+
+    // Editing a label while that deck stays selected must land too — the uuid does not change.
+    focusedGroups = [{ name: 'Sermon Points', slides: [
+      { label: 'Point One' }, { label: 'Point Two' }, { label: 'Point Three' } ] }];
+    await sleep(3000);
+    ok('a label edited in the focused deck appears without reselecting',
+       optVals(bindOf('Ghost')).indexOf('L:Point Three') >= 0);
+  }
+
+  /* ---- "Type a label…" ----
+     ProPresenter publishes its Groups library but has NO endpoint for Settings -> Slide
+     Labels, so a label that sits on no slide of any deck seen here is otherwise
+     unreachable. Must use askText: window.prompt is a no-op in Electron. */
+  {
+    const g = bindOf('Ghost');
+    ok('the dropdown offers a way in for a label the API cannot publish',
+       optVals(g).some(v => /typeLabel/.test(v)));
+    g.value = optVals(g).find(v => /typeLabel/.test(v));
+    g.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(120);
+    const dlg = D.querySelector('.lt-ask');
+    ok('a text dialog opens (not a dead window.prompt)', !!dlg);
+    const inp = dlg.querySelector('input[type=text]');
+    inp.value = '  spoken WORD  ';            // deliberately messy
+    inp.dispatchEvent(new W.Event('input', { bubbles: true }));
+    click(dlg.querySelector('[data-ask="ok"]'));
+    await sleep(300);
+    ok('the typed label becomes the binding', bindOf('Ghost').value === 'L:spoken WORD');
+    // Read the PERSISTED library, not this element's own dropdown: paint() re-adds an
+    // unknown current binding under "Not in the current deck", so checking the dropdown
+    // passes whether or not the merge happened. (Mutation-tested — the dropdown version
+    // survived deleting the merge entirely.)
+    let lib2 = null; try { lib2 = JSON.parse(W.localStorage.getItem('pplt.pplib.v1')); } catch (e) {}
+    ok('...and joins the library, so every other element is offered it',
+       !!lib2 && lib2.labels.indexOf('spoken WORD') >= 0);
+    // Matching is case-insensitive, so a hand-typed label behaves like a polled one.
+    ok('a typed label matches the real slide regardless of case',
+       W.ppMatches('L:spoken WORD', { label: 'Spoken Word' }) === true);
+
+    // Cancelling must not strand the sentinel as the element's binding.
+    const g2 = bindOf('Ghost');
+    g2.value = optVals(g2).find(v => /typeGroup/.test(v));
+    g2.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(120);
+    click(D.querySelector('.lt-ask [data-ask="cancel"]'));
+    await sleep(300);
+    ok('cancelling leaves the previous binding intact', bindOf('Ghost').value === 'L:spoken WORD');
+
+    // An all-whitespace entry is the same as cancelling — it must not bind the element to
+    // an empty label, which ppMatches would treat as "any slide" and quietly un-gate it.
+    const g3 = bindOf('Ghost');
+    g3.value = optVals(g3).find(v => /typeLabel/.test(v));
+    g3.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(120);
+    const dlg3 = D.querySelector('.lt-ask');
+    dlg3.querySelector('input[type=text]').value = '     ';
+    click(dlg3.querySelector('[data-ask="ok"]'));
+    await sleep(300);
+    ok('a blank entry changes nothing', bindOf('Ghost').value === 'L:spoken WORD');
+    ok('...and adds no empty label to the library', (() => {
+      let l = null; try { l = JSON.parse(W.localStorage.getItem('pplt.pplib.v1')); } catch (e) {}
+      return !!l && l.labels.every(x => x.trim() !== '');
+    })());
   }
 
   /* ---- unbinding releases the element ---- */

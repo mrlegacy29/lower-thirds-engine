@@ -176,6 +176,59 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
     pushSSE(Object.assign(W.defaultConfig(), { conn: cfg.conn, _take: 31 })); await sleep(200);
   }
 
+  /* ---------- Logo / Slogan layer, on the page OBS actually renders ----------
+     The console suite (logo_layer_test) proves the operator row and the Program monitor.
+     This is the OTHER render path, and the split between them is the single most repeated
+     bug in this project. Two things have to hold here specifically:
+       - no ProPresenter clear may take a logo down; and
+       - the operator's toggle arrives as a plain bus.publish with NO _take bump, so the
+         output page must re-render from a config change alone. If it only acted on a _take
+         change, a logo would be impossible to clear from OBS for the rest of the service. */
+  {
+    const cfg = W.defaultConfig();
+    const logo = W.createElement('logo');
+    logo.id = 'lg1'; logo.name = 'Church logo';
+    logo.content = { title: 'VICTORY WORSHIP', sub: 'Come as you are' };
+    logo.visible = true;
+    logo.anim = Object.assign({}, logo.anim, { durIn: 0, durOut: 0 });
+    cfg.elements = cfg.elements.concat([logo]);
+    cfg.conn = Object.assign({}, cfg.conn, { host: '127.0.0.1', port: 1025, pollMs: 200 });
+    cfg._take = 40;
+    pushSSE(cfg);
+    slideText = 'John 3:16\nFor God so loved the world.'; slideActive = true; presActive = true;
+    layersObj = { slide: true, media: true };
+    await sleep(500);
+
+    const air = () => onAirText(D, W, '#out-scaler');
+    ok('logo: on air alongside a live verse', /VICTORY WORSHIP/.test(air()) && /John 3:16/.test(air()));
+
+    // F2 — Clear Slide
+    slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: true };
+    await sleep(700);
+    ok('logo: survives F2 on the output page', /VICTORY WORSHIP/.test(air()));
+
+    // F1 — Clear All. Every visual layer off; the verse must go, the logo must not.
+    layersObj = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
+    await sleep(700);
+    ok('logo: survives F1 (Clear All) on the output page', /VICTORY WORSHIP/.test(air()));
+    ok('logo: ...and the verse really did clear', !/John 3:16/.test(air()));
+
+    // The operator clears it: same _take, only .visible changed.
+    const off = W.defaultConfig();
+    off.elements = cfg.elements.map(e => e.id === 'lg1' ? Object.assign({}, e, { visible: false }) : e);
+    off.conn = cfg.conn; off._take = 40;                 // DELIBERATELY unchanged
+    pushSSE(off); await sleep(300);
+    ok('logo: a visible-only broadcast (no new _take) takes it off air', !/VICTORY WORSHIP/.test(air()));
+
+    const back = W.defaultConfig();
+    back.elements = cfg.elements; back.conn = cfg.conn; back._take = 40;
+    pushSSE(back); await sleep(300);
+    ok('logo: ...and puts it straight back', /VICTORY WORSHIP/.test(air()));
+
+    pushSSE(Object.assign(W.defaultConfig(), { conn: cfg.conn, _take: 41 })); await sleep(250);
+    slideText = ''; slideActive = false; presActive = true; layersObj = { slide: false, media: true };
+  }
+
   // a partial/garbage broadcast must not throw on-air (deepMerge guard)
   const errBefore2 = errors.length;
   pushSSE({ _take: 11 }); await sleep(80);

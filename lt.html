@@ -255,6 +255,11 @@
     font-size:12px;font-weight:600}
   .simbtn:hover{border-color:#3a4654}
   .simbtn.on{border-color:var(--accent-d);color:var(--accent)}
+  .logobtns{display:flex;gap:8px;flex-wrap:wrap}
+  /* A logo that is ON AIR is the one thing ProPresenter can't take down, so it gets the
+     loudest state in the console — the operator must never wonder whether it is up. */
+  .simbtn.live{border-color:#2c5740;background:rgba(48,209,88,.12);color:var(--ok)}
+  #console-root.skin-simple .simbtn.live{background:#e6f8ec;border-color:#38b45f;color:#14663a}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:.9em;color:#ffd089}
   .empty{color:var(--faint);font-size:12px;padding:10px 2px;line-height:1.5}
 
@@ -450,6 +455,12 @@
       <button class="simbtn" id="simClear">Clear</button>
       <button class="simbtn" id="simLive" style="margin-left:auto">Live ProPresenter feed: OFF</button>
     </div>
+    <!-- Logo / slogan layers. Hidden until a logo element exists. These go straight to air
+         on click — they are the ONLY thing that takes a logo down, by design. -->
+    <div class="simrow logorow" id="logoRow" style="display:none">
+      <span class="lbl">Logo / Slogan</span>
+      <span id="logoBtns" class="logobtns"></span>
+    </div>
   </main>
 </div>
 
@@ -562,6 +573,29 @@ function createElement(type){
     base.style={ ref:styleDefaults({font:"'Oswald',sans-serif",size:38,weight:"600",color:"#c9a24b",letter:2,upper:true}) };
     base.showTr=true;
     base.box=boxDefaults({style:"bar",useGrad:false,fill1:"#0b1220",opacity:.85,padX:30,padY:16,accent:true});
+  } else if(type==="logo"){
+    // A station-ident layer: church logo, ministry name, a slogan — up over everything and
+    // NOT subject to ProPresenter at all. layer 10 puts it above the lower thirds.
+    //
+    // What actually makes it survive F1/F2 is that its content is MANUAL: contentFor never
+    // consults the live slide, so no clear path can empty it. vis:"always" is belt-and-braces
+    // declaring that intent (and is why it appears in the activeBase empty-content guard
+    // alongside the clock) — do not mistake it for the mechanism; a mutation to vis:"auto"
+    // changes nothing, which is exactly why the suite pins F1/F2 behaviour instead of vis.
+    //
+    // Media (image or mp4) rides on box.mediaSrc like every other element, so a logo can be
+    // a PNG, an animated bug, or just type. Ships visible:false so adding one does not
+    // immediately push a plate on air — the operator turns it on from the Logo / Slogan row.
+    base.name="Logo / Slogan"; base.layout={x:1380,y:60,w:460,h:170};
+    base.source={kind:"manual"};
+    base.vis="always"; base.layer=10; base.visible=false;
+    base.content={title:"",sub:""};
+    base.style={ title:styleDefaults({font:"'Oswald',sans-serif",size:44,weight:"700",color:"#ffffff"}),
+                 sub:styleDefaults({font:"Georgia,serif",size:24,weight:"400",color:"#c9a24b",italic:true}) };
+    // Transparent by default: a logo is usually a PNG that carries its own shape, and a
+    // glass slab behind it is exactly what nobody wants riding on air all service.
+    base.box=boxDefaults({style:"minimal",useGrad:false,opacity:0,accent:false,shadow:false,
+                          padX:10,padY:10,align:"right",mediaFit:"contain"});
   } else if(type==="sermonTitle"){
     base.name="Sermon title"; base.layout={x:120,y:80,w:1000,h:140};
     base.content={title:"The Cost of Discipleship",sub:"Pastor Mike Reynolds"};
@@ -1152,8 +1186,8 @@ function migrateLayout(cfg){
 
 const TYPE_LABELS={scripture:"Scripture",reference:"Reference",sermonTitle:"Sermon title",
   bulletList:"Bullet list",history:"Scripture ref list",eventList:"Event list",name:"Name/title",text:"Text",media:"Image / Media",
-  clock:"Timer / clock",qr:"QR code"};
-const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media","clock","qr"];
+  clock:"Timer / clock",qr:"QR code",logo:"Logo / Slogan"};
+const ADD_TYPES=["scripture","reference","name","sermonTitle","bulletList","history","eventList","text","media","clock","qr","logo"];
 // Types that can scroll as a ticker / credits-roll. Shared by setText (which decides
 // whether to hand off to renderMarquee) and applyBox (which needs the same answer one
 // step EARLIER, from the config alone).
@@ -1822,6 +1856,8 @@ function createPP(opts){
         }catch(e){ /* transient — hold the last group/label */ }
       } else { slideGroup=""; slideLabel=""; }
       if(!running || myGen!==gen) return;
+      await pollFocusedDeck(sig,myGen);
+      if(!running || myGen!==gen) return;
       // Timers are only polled when a clock element is actually mirroring one, so
       // the common config pays nothing for this.
       if(wantTimers){
@@ -1865,10 +1901,48 @@ function createPP(opts){
       if(running && myGen===gen) timer=setTimeout(()=>tick(myGen),pollMs);
     }
   }
-  /* ProPresenter's GLOBAL group library (Verse, Chorus, Bridge, plus anything the
-     operator added). Verified present on PP 21.2; older builds 404, in which case the
-     dropdown simply falls back to the groups found in the live deck. Fetched once per
-     connect — it is a preferences list, not live state. */
+  /* The deck ProPresenter merely has OPEN, as opposed to the one it is presenting.
+     /v1/presentation/focused (verified on PP 21.2) returns just {uuid,name,index} for
+     whatever is selected in the editor, and /v1/presentation/<uuid> returns its full
+     group/slide structure. Without this a label or group only reached the operator's
+     dropdown once the deck had actually been put ON SCREEN — you had to present next
+     Sunday's sermon deck to the congregation in order to configure a look for it.
+
+     Only the tiny "focused" call runs on the poll: when the focused deck IS the live one,
+     the main presentation path already has it and the heavy fetch is skipped. Everything
+     is contained — this is optional enrichment and must never disturb the feed. */
+  let focusSig="", focusEvery=0;
+  async function pollFocusedDeck(signal,myGen){
+    if(!opts.onDeck) return;                       // the output page has no dropdown to fill
+    if((focusEvery++ % 10)!==0) return;            // ~every 2s at the default 200ms poll
+    try{
+      const fr=await ppGet("/v1/presentation/focused",signal);
+      if(!running || myGen!==gen || !fr.ok) return;
+      const fj=await fr.json();
+      const uuid=String((fj&&fj.uuid)||(fj&&fj.id&&fj.id.uuid)||"");
+      if(!uuid || uuid===presUid) return;          // it is the live deck; already covered
+      const dr=await ppGet("/v1/presentation/"+encodeURIComponent(uuid),signal);
+      if(!running || myGen!==gen || !dr.ok) return;
+      const dj=await dr.json();
+      const flat=flattenGroups((dj&&dj.presentation)||dj);
+      if(!flat.length) return;
+      // Signature, not uuid: editing labels while the same deck stays selected is exactly
+      // what someone does when setting these up, and a uuid check would miss every edit.
+      const sg=uuid+"|"+flat.map(s=>s.group+""+s.label).join("");
+      if(sg===focusSig) return;
+      focusSig=sg;
+      try{ opts.onDeck(deckLib(flat)); }catch(e){}
+    }catch(e){ /* optional enrichment — never let it affect the feed */ }
+  }
+  /* ProPresenter's GLOBAL group library — the list under Settings -> Groups. Verified on
+     PP 21.2 that it returns the LIBRARY (25 stock names on Brandon's rig) and NOT the
+     groups used by the open deck, whose ad-hoc group name was absent from it. That is why
+     a custom group created there reaches the operator's dropdown with no deck open at all.
+     There is NO equivalent for Settings -> Slide Labels: /v1/labels, /v1/slide_labels,
+     /v1/status/labels and every variant tried return 404, and the server publishes no API
+     documentation endpoint to prove otherwise. Labels therefore only ever come from a deck
+     the app has seen, or get typed in by hand.
+     Fetched once per connect — it is a preferences list, not live state. */
   async function loadLibrary(myGen){
     try{
       const r=await ppGet("/v1/groups");
@@ -1885,7 +1959,7 @@ function createPP(opts){
       // A reconnect must re-offer the deck's labels: presSig is what suppresses a repeat
       // fire, and without clearing it a fresh connect to the same deck would leave the
       // dropdown empty until the operator changed presentations.
-      presUid=null; presFlat=[]; presSig="";
+      presUid=null; presFlat=[]; presSig=""; focusSig=""; focusEvery=0;
       const myGen=++gen; tick(myGen); loadLibrary(myGen); },
     stop(){ running=false; gen++; if(timer){clearTimeout(timer);timer=null;} },
     setWantTimers(b){ wantTimers=!!b; },
@@ -2062,7 +2136,10 @@ function makeElRenderer(){
       const ref=el("div",{class:"node r-ref"}); const body=el("div",{class:"node r-body"});
       content.append(ref,body); }
     else if(t==="reference"){ content.append(el("div",{class:"node r-ref"})); }
-    else if(t==="sermonTitle"){ content.append(el("div",{class:"node s-title"}),el("div",{class:"node s-sub"})); }
+    // A logo/slogan is a title + subtitle over an optional image or video, which is exactly
+    // the sermon-title shape — so it reuses those nodes and that render path rather than
+    // adding a second one to keep in sync.
+    else if(t==="sermonTitle"||t==="logo"){ content.append(el("div",{class:"node s-title"}),el("div",{class:"node s-sub"})); }
     else if(t==="name"){ content.append(el("div",{class:"node n-name"}),el("div",{class:"node n-title"})); }
     else if(t==="text"){ content.append(el("div",{class:"node t-text"})); }
     else if(t==="media"){ content.append(el("div",{class:"node media-hint"})); }
@@ -2163,7 +2240,7 @@ function makeElRenderer(){
       if(rtext&&tr&&d.showTr!==false) ref.innerHTML=esc(rtext)+` <span class="tr">${esc(tr)}</span>`;
       else ref.textContent=rtext;
       ref.style.display=rtext?"block":"none"; typeCss(ref,st.ref);
-    } else if(t==="sermonTitle"){
+    } else if(t==="sermonTitle"||t==="logo"){
       // Read through manualContent so {{placeholders}} are filled from bound data —
       // reading d.content directly put the literal braces on air.
       const ti=content.querySelector(".s-title"), su=content.querySelector(".s-sub");
@@ -2450,6 +2527,15 @@ function createStage(scaler,opts){
       if(!items.length && !headerHold && !interactive) return null;
       return {items,headerHold};
     }
+    if(d.type==="logo"){
+      // Persistent by design, so the "nothing to say" guard matters MORE here than
+      // anywhere else: an empty logo pinned by vis:"always" would ride on air for the
+      // whole service. Media counts as content — a logo is often a PNG and no text.
+      const c=subVars(d.content||{}), b=d.box||{};
+      const empty=!String(c.title||"").trim() && !String(c.sub||"").trim() && !String(b.mediaSrc||"").trim();
+      if(empty && !interactive) return null;     // still shown in the builder, to position it
+      return {};
+    }
     if(d.type==="eventList"){ const lines=String(subVars(d.content||{}).items||"").split("\n").map(s=>s.trim()).filter(Boolean);
       return {items:lines.map((t,i)=>({id:"m"+i,ref:t}))}; }
     if(d.type==="qr"){
@@ -2542,7 +2628,10 @@ function createStage(scaler,opts){
     // "Always on screen" must not override an element that explicitly asked to hide.
     // A clock with "hide at zero" returns null from contentFor; forcing it visible
     // anyway painted a styled but EMPTY plate on air and left it there.
-    if(d.vis==="always") return !(d.type==="clock" && contentFor(d)===null);
+    // "Always on screen" must not override an element that explicitly asked to hide. A logo
+    // is added to this guard for the same reason as the clock: it SHIPS vis:"always", so
+    // without it an unconfigured one is pinned on air permanently by default.
+    if(d.vis==="always") return !((d.type==="clock"||d.type==="logo") && contentFor(d)===null);
     if(d.vis==="linked") return null;        // resolve through target
     return contentFor(d)!==null;
   }
@@ -3078,6 +3167,50 @@ if(!isOutput){
   }
   function startConsolePP(){ pp.stop(); refreshWantTimers(); if(preview.conn.host){ pp.connect(preview.conn.host,preview.conn.port,preview.conn.pollMs); _ppConnSig=JSON.stringify(preview.conn); } }
 
+  /* ---- LOGO / SLOGAN layer ----
+     A station ident that rides above everything and is deliberately outside ProPresenter's
+     reach: it ships vis:"always", so a Clear All (F1) does not touch it. That makes THIS
+     row the only thing that can take it down, which is the whole point — but it also means
+     the control has to be honest and immediate, not something you have to remember to TAKE. */
+  function logoEls(cfg){ return ((cfg&&cfg.elements)||[]).filter(e=>e&&e.type==="logo"); }
+  function renderLogoRow(){
+    const row=$("logoRow"), box=$("logoBtns"); if(!row||!box) return;
+    // Driven off PROGRAM, not Preview: this row reports what OBS is actually showing.
+    const els=logoEls(program), live=new Set(els.map(e=>e.id));
+    // A logo that has been ADDED but not taken yet would otherwise leave this row empty
+    // while the builder clearly shows the element — which reads as the feature being
+    // broken. List it, greyed, saying what it is waiting for.
+    const pending=logoEls(preview).filter(e=>!live.has(e.id));
+    row.style.display=(els.length||pending.length)?"":"none";
+    box.textContent="";
+    els.forEach(e=>{
+      const on=e.visible!==false;
+      box.append(el("button",{class:"simbtn"+(on?" live":""),
+        text:(e.name||"Logo")+(on?"  ● ON AIR":"  ○ off"),
+        title:on?"On air — click to clear it":"Click to put it on air",
+        onclick:()=>logoSetVisible(e.id,!on)}));
+    });
+    pending.forEach(e=>{
+      const b=el("button",{class:"simbtn",style:"opacity:.55",
+        text:(e.name||"Logo")+"  — press Take",
+        title:"This logo is in Preview only. Press TAKE TO AIR to send it to OBS first."});
+      b.disabled=true; box.append(b);
+    });
+  }
+  function logoSetVisible(id,on){
+    // Applied to BOTH configs. Program alone would leave TAKE reporting phantom pending
+    // changes for the rest of the service; Preview alone would never reach OBS.
+    const apply=(cfg)=>{ ((cfg&&cfg.elements)||[]).forEach(e=>{ if(e&&e.id===id) e.visible=!!on; }); };
+    apply(preview); savePreview();
+    apply(program); lsSet(LS_PROGRAM,program);
+    // Deliberately does NOT bump _take: the output page replays every entrance on a new
+    // take, so a logo toggle would re-animate the verse that is on air mid-service.
+    bus.publish(program);
+    applyPreview(); pgStage.setConfig(program); pgStage.setHistory(liveLog);
+    renderPanels();          // which repaints this row itself
+    updateTakeState();
+  }
+
   /* ---- TRANSITION (take) / REVERT ---- */
   let _takeNonce=0;
   $("btnTrans").onclick=()=>{ _takeNonce=Math.max(Date.now(),_takeNonce+1);   // strictly increasing: a same-ms double-take still replays on Output
@@ -3088,7 +3221,7 @@ if(!isOutput){
     // flashTrans() used to run here, unconditionally — the operator saw success before the
     // publish had even resolved. The onStatus handler now flashes green on a confirmed send
     // and red on a refusal.
-    _takePending=true; refreshURL(); updateTakeState(); };
+    _takePending=true; refreshURL(); updateTakeState(); renderLogoRow(); };
   $("btnRevert").onclick=()=>{ preview=clone(program); delete preview._take; savePreview(); selectedId=preview.elements[0]?preview.elements[0].id:null;
     // Revert copies PROGRAM back over Preview, so whatever look tile was highlighted is no
     // longer what is loaded. Clear it rather than leave the grid pointing at a look the
@@ -3155,6 +3288,9 @@ if(!isOutput){
     panels.append(secTheme());
     panels.append(secOutput());
     panels.append(secPresets());
+    // Adding, renaming or deleting a logo has to reach the operator row immediately — it
+    // lives outside #panels, so nothing else would repaint it.
+    renderLogoRow();
   }
   // Deleting an element used to leave every reference to it dangling. resolveActive()
   // then returns false forever for anything with vis:"linked" pointing at it, so that
@@ -3188,6 +3324,22 @@ if(!isOutput){
     d.append(sm,b); return d;
   }
 
+  /* ProPresenter publishes its GROUPS library (/v1/groups) but has no endpoint at all for
+     Settings -> Slide Labels — every path tried returns 404 — so a label that exists there
+     but sits on no slide of any deck the app has seen is otherwise unreachable. Typing one
+     is the escape hatch, and it is exact: ppMatches compares trimmed + case-insensitively,
+     so a hand-typed label behaves identically to a polled one. Typing a GROUP is offered
+     too, for a ProPresenter build old enough to 404 on /v1/groups.
+     askText, NOT window.prompt — prompt() is a no-op in Electron and every naming flow that
+     used it was silently dead in the packaged app. */
+  const PP_ASK_L=" typeLabel", PP_ASK_G=" typeGroup";
+  async function ppAskCustom(kind){
+    const v=await askText("ProPresenter "+(kind==="G"?"group":"slide label")+" name","","Use it");
+    const s=String(v==null?"":v).trim();
+    if(!s) return null;
+    ppLibMerge(kind==="G"?{groups:[s]}:{labels:[s]});   // offer it to every other element too
+    return kind+":"+s;
+  }
   /* One element's ProPresenter binding, as it appears beside the name in the Layers list.
      Repaints itself in place when a new deck brings new labels in, so the operator can add
      a label in ProPresenter and pick it here without reopening anything. */
@@ -3214,13 +3366,28 @@ if(!isOutput){
         og.append(el("option",{value:cur,text:cur.slice(2)||cur}));
         s.append(og);
       }
+      const og2=el("optgroup"); og2.label="Not listed?";
+      og2.append(el("option",{value:PP_ASK_L,text:"Type a label…"}));
+      og2.append(el("option",{value:PP_ASK_G,text:"Type a group…"}));
+      s.append(og2);
       s.value=cur;
     };
     paint();
     _ppSelRepaint.push(paint);
     s.title="Only put this on air when ProPresenter's live slide carries this label / group";
     s.onclick=(e)=>e.stopPropagation();      // the row itself selects the element
-    s.onchange=()=>{ d.ppMatch=s.value; applyPreview(); renderPanels(); };
+    s.onchange=()=>{
+      const v=s.value;
+      if(v===PP_ASK_L||v===PP_ASK_G){
+        s.value=String(d.ppMatch||"");       // never leave the sentinel showing as the binding
+        ppAskCustom(v===PP_ASK_G?"G":"L").then(nv=>{
+          if(nv){ d.ppMatch=nv; applyPreview(); }
+          renderPanels();                    // repaint either way — cancel must restore the row
+        });
+        return;
+      }
+      d.ppMatch=v; applyPreview(); renderPanels();
+    };
     return s;
   }
   /* ---- layers list ---- */
@@ -3533,10 +3700,18 @@ if(!isOutput){
       // Same reason as the Layers select: never let an unknown binding be silently
       // reported as "Any slide".
       if(cur && !bindOpts.some(o=>o[0]===cur)) bindOpts.push([cur,(cur.slice(0,2)==="G:"?"Group: ":"Label: ")+cur.slice(2)+"  (not in the current deck)"]);
-      rows.push(rowSelect("Only on air when the live slide is",cur,bindOpts,(v)=>{d.ppMatch=v;onCh();renderPanels();}));
+      bindOpts.push([PP_ASK_L,"Type a label\u2026"]);
+      bindOpts.push([PP_ASK_G,"Type a group\u2026"]);
+      rows.push(rowSelect("Only on air when the live slide is",cur,bindOpts,(v)=>{
+        if(v===PP_ASK_L||v===PP_ASK_G){
+          ppAskCustom(v===PP_ASK_G?"G":"L").then(nv=>{ if(nv){ d.ppMatch=nv; onCh(); } renderPanels(); });
+          return;
+        }
+        d.ppMatch=v; onCh(); renderPanels();
+      }));
       rows.push(el("p",{class:"hint",text:ppLib.labels.length||ppLib.groups.length
-        ? "Label a slide in ProPresenter and bind an element to it \u2014 that verse then lands in this element's position. The list above is read live from ProPresenter; the builder preview always shows the element so you can still place it, the Program monitor and OBS obey the binding."
-        : "Connect to ProPresenter (Connection panel) and the labels and groups from your open presentation appear here automatically \u2014 there is nothing to retype."}));
+        ? "Bind an element to a ProPresenter group or slide label and that verse lands in this element's position. GROUPS are the reliable route \u2014 ProPresenter publishes its whole Groups library, so a custom group appears here as soon as you connect. Slide labels are only offered once the app has seen a deck carrying them; type one in if it is missing. The builder preview always shows the element so you can still place it \u2014 the Program monitor and OBS obey the binding."
+        : "Connect to ProPresenter (Connection panel) and its Groups library plus the labels on any deck you have open appear here automatically \u2014 there is nothing to retype."}));
     }
 
     rows.push(el("div",{class:"gh",text:"Layering"}));
@@ -3668,6 +3843,15 @@ if(!isOutput){
         rowText("Subtitle / speaker",c.sub,(v)=>{c.sub=v;onCh();}),
         typeGroup("Title style",st.title,onCh),
         typeGroup("Subtitle style",st.sub,onCh)
+      ]);
+    }
+    if(t==="logo"){
+      return group("Content",[
+        el("p",{class:"hint",text:"Rides above everything and ignores ProPresenter entirely — F1 / Clear All will not touch it. It goes off air only when you clear it from the Logo / Slogan row under the monitors. Leave the text blank and use a PNG or MP4 in Background image / video for a logo bug."}),
+        rowText("Logo text",c.title,(v)=>{c.title=v;onCh();}),
+        rowText("Slogan",c.sub,(v)=>{c.sub=v;onCh();}),
+        typeGroup("Logo text style",st.title,onCh),
+        typeGroup("Slogan style",st.sub,onCh)
       ]);
     }
     if(t==="bulletList"){

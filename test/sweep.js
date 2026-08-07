@@ -50,11 +50,13 @@ setTimeout(async()=>{
   // color: a color field
   const color=D.querySelector('.secbody input[type=color]'); setVal(color, '#123456');
   const colorText=color.parentElement.querySelector('input[type=text]'); setVal(colorText,'#abcdef');
-  // select: font or weight. Must skip selects with nothing to pick — the Layers list now
-  // carries a per-element ProPresenter-label binding whose only entry is "Any slide" until
-  // a deck has been polled, and it comes FIRST in the DOM. Blindly taking options[1] of the
-  // first select threw on undefined and killed the whole sweep.
-  const select=[...D.querySelectorAll('.secbody select')].find(s=>s.options.length>1);
+  // select: font or weight. Two exclusions, both learned the hard way:
+  //   - skip selects with nothing to pick (options[1] was undefined and threw, killing the
+  //     whole sweep);
+  //   - skip .ppbind, the Layers ProPresenter-label binding. It is not a value picker: its
+  //     trailing entries are ACTIONS that open the "type a label" dialog, and a stray dialog
+  //     left open here silently swallowed the preset-naming step much further down this file.
+  const select=[...D.querySelectorAll('.secbody select:not(.ppbind)')].find(s=>s.options.length>1);
   if(select){ select.value=select.options[1].value; select.dispatchEvent(new W.Event('change',{bubbles:true})); }
   // toggle (switch)
   const toggle=D.querySelector('.secbody .sw input[type=checkbox]'); if(toggle){ toggle.checked=!toggle.checked; toggle.dispatchEvent(new W.Event('change',{bubbles:true})); }
