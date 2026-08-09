@@ -106,13 +106,27 @@ MP4 (drop a PNG in *Background image / video* and leave the text blank for a
 plain logo bug).
 
 Like everything else, **F1 / Clear All takes it down** — and the next live slide
-brings it straight back, still armed. The **Logo / Slogan** row under the
-monitors is the manual control: clicks go straight to air with no Take, and the
-button reads **● ON AIR**, **◐ cleared by F1/F2** (armed, but a clear is holding
-it off), or **○ off**. Clicking it on while the screen is cleared forces the
-logo up anyway — for the post-service ident — and the next live slide hands
-control back to ProPresenter. Tick **Stay on air through ProPresenter clears**
-on the element if it should ignore F1/F2 entirely.
+brings it straight back, still armed. Clicking its button on while the screen is
+cleared forces the logo up anyway — for the post-service ident — and the next
+live slide hands control back to ProPresenter. Tick **Stay on air through
+ProPresenter clears** on the element (or pick **● Always live** in its Layers
+dropdown) if it should ignore F1/F2 entirely.
+
+### The Layers row — every layer, one click
+
+The **Layers** row under the monitors gives **every layer** the same
+straight-to-air on/off button the logo has: clicks apply immediately, no Take,
+and never leave the Take button falsely pending. Each button reports what OBS is
+*actually* painting, not just what's enabled:
+
+- **● ON AIR** — painted right now; click to clear it
+- **◐ cleared by F1 / F2** — armed, but a ProPresenter clear is holding it down
+  (next slide returns it; click twice to force it up now)
+- **◐ waiting for its slide** — bound to a label/group the live slide doesn't carry
+- **◐ standby** — armed but nothing to show (no live verse, empty content)
+- **○ off** — hidden by hand; click to show
+
+A layer added in the builder but not yet taken shows greyed as "— press Take."
 
 When a new version is published, the app shows **"Update available → downloading
 → Restart & Install."**

@@ -58,15 +58,21 @@ const setText = (inp, v) => { inp.value = v; inp.dispatchEvent(new W.Event('inpu
 (async () => {
   await sleep(700);
 
-  /* ---- it is offered, and adding one does not immediately put a plate on air ---- */
+  /* ---- it is offered, and adding one does not immediately put a plate on air ----
+     The row under the monitors is now the LAYERS row (generalised 2026-08-09 at Brandon's
+     request): every layer gets the logo-style straight-to-air button, so at boot it already
+     lists the stock elements — the logo-specific assertion is that no LOGO button exists
+     until a logo does. */
   ok('the Logo / Slogan layer can be added', !!addBtn('Logo / Slogan'));
-  ok('no logo row while no logo exists', !logoRowShown());
+  ok('the Layers row lists the stock layers from boot', logoRowShown() && logoBtns().length >= 2);
+  const logoBtn = () => logoBtns().find(b => /Logo/i.test(b.textContent));
+  ok('...but carries no Logo button while no logo exists', !logoBtn());
   click(addBtn('Logo / Slogan'));
   await sleep(120);
   const row = rowByType('logo');
   ok('a logo element is created', !!row);
-  ok('the operator row appears', logoRowShown());
-  ok('...listing it as not yet taken', /press Take/i.test(logoBtns().map(b => b.textContent).join(' ')));
+  ok('the Layers row lists it', !!logoBtn());
+  ok('...as not yet taken', /press Take/i.test(logoBtn().textContent));
 
   /* ---- give it content, then take it ---- */
   click(row.querySelector('.nm')); await sleep(80);
@@ -77,7 +83,7 @@ const setText = (inp, v) => { inp.value = v; inp.dispatchEvent(new W.Event('inpu
   setText(sIn, 'Come as you are'); await sleep(60);
   click(D.getElementById('btnTrans')); await sleep(350);
 
-  const btn = () => logoBtns()[0];
+  const btn = () => logoBtns().find(b => /Logo/i.test(b.textContent));
   ok('after Take the row offers a real on/off button', !!btn() && !btn().disabled);
   // It ships visible:false, so adding one never surprises anyone on air.
   ok('a new logo starts OFF air', /off/i.test(btn().textContent));
@@ -103,6 +109,25 @@ const setText = (inp, v) => { inp.value = v; inp.dispatchEvent(new W.Event('inpu
   slideText = 'John 3:16\nFor God so loved the world.'; slideActive = true; presActive = true;
   layersObj = { slide: true, media: true }; await sleep(500);
   ok('a live verse does not disturb the logo', /VICTORY WORSHIP/.test(stageText('pg-scaler')));
+
+  /* ---- EVERY layer gets the same button, and it is just as immediate ----
+     The generalisation is only real if a non-logo layer behaves identically: straight to
+     air, straight off air, no Take pending either way. The scripture layer is the probe —
+     a live verse is up, so its button must read ON AIR right now. Asserted on the verse
+     BODY, not "John 3:16": the reference list carries the reference as a chip, so a
+     reference-based check could pass on the list alone. */
+  {
+    const scrBtn = () => logoBtns().find(b => b.textContent.startsWith('Scripture  '));
+    ok('the scripture layer has its own button, reading ON AIR', !!scrBtn() && /ON AIR/.test(scrBtn().textContent));
+    click(scrBtn()); await sleep(300);
+    ok('clicking it takes the verse off air immediately', !/For God so loved/.test(stageText('pg-scaler')));
+    ok('...the button says off', /off/i.test(scrBtn().textContent));
+    ok('...without touching the logo', /VICTORY WORSHIP/.test(stageText('pg-scaler')));
+    ok('...and without leaving TAKE pending', /ON AIR/i.test(takeLabel()));
+    click(scrBtn()); await sleep(300);
+    ok('a second click puts the verse straight back', /For God so loved/.test(stageText('pg-scaler')));
+    ok('...and TAKE is still not pending', /ON AIR/i.test(takeLabel()));
+  }
   // F2 / Clear Slide
   slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: true };
   await sleep(700);
@@ -165,13 +190,14 @@ const setText = (inp, v) => { inp.value = v; inp.dispatchEvent(new W.Event('inpu
     ok('...and the image returns on the next live slide', !!img3 && painted(img3, W, D));
   }
 
-  /* ---- deleting it retires the row ---- */
+  /* ---- deleting it retires its button (the row itself stays for the other layers) ---- */
   {
     const r = rowByType('logo');
     click(r.querySelector('.ic.danger') || [...r.querySelectorAll('.ic')].pop());
     await sleep(150);
     click(D.getElementById('btnTrans')); await sleep(350);
-    ok('deleting the logo hides the operator row', !logoRowShown());
+    ok('deleting the logo removes its button', !logoBtns().some(b => /Logo/i.test(b.textContent)));
+    ok('...while the Layers row stays for the other layers', logoRowShown() && logoBtns().length >= 2);
   }
 
   ok('none of it raised a console error', errors.length === 0);

@@ -462,7 +462,7 @@
     <!-- Logo / slogan layers. Hidden until a logo element exists. These go straight to air
          on click — they are the ONLY thing that takes a logo down, by design. -->
     <div class="simrow logorow" id="logoRow" style="display:none">
-      <span class="lbl">Logo / Slogan</span>
+      <span class="lbl">Layers</span>
       <span id="logoBtns" class="logobtns"></span>
     </div>
   </main>
@@ -597,7 +597,7 @@ function createElement(type){
     // gate in activeBase now takes it off with the rest of the screen. Two things keep that
     // from being a loss: the clear is TRANSIENT (the next live slide brings the logo back
     // with nothing to re-arm), and the Logo / Slogan row can still force it up during a clear
-    // — see logoSetVisible. vis:"always" now means only what it says on the tin: it does not
+    // — see layerSetVisible. vis:"always" now means only what it says on the tin: it does not
     // re-animate on a new verse, and it needs the empty-content guard in activeBase (beside
     // the clock) so an unconfigured one is not pinned on air.
     //
@@ -2969,9 +2969,13 @@ function createStage(scaler,opts){
   startClockTick();
   return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,setSlideMeta,setCleared,select,setScale,replayVisible,
     hasClock, stopClockTick,
-    // What ProPresenter has cleared right now ("none"|"slide"|"all"). The console's Logo /
-    // Slogan row reads it so an armed-but-cleared logo cannot keep claiming "ON AIR".
+    // What ProPresenter has cleared right now ("none"|"slide"|"all"). The console's Layers
+    // row reads it so an armed-but-cleared layer cannot keep claiming "ON AIR".
     clearKind:()=>clearKind,
+    // Would the current clear let this element stay up? The Layers row uses it to tell
+    // "cleared by F1/F2" apart from "waiting for its slide" / "nothing to show" — the same
+    // rule the renderer applies, exported instead of duplicated so the two cannot drift.
+    clearGateOk:(d)=>clearGateOk(d),
     // Is an automation rule currently holding this element? null = no rule has an opinion.
     // The Layers panel needs this to stop claiming "Visible" for something a rule is
     // holding off air, and to explain why its eye toggle appears to do nothing.
@@ -3398,53 +3402,67 @@ if(!isOutput){
       _clearKind="none"; pgStage.setCleared("none"); pvStage.setCleared("none"); renderLogoRow();
     } }
 
-  /* ---- LOGO / SLOGAN layer ----
-     A station ident that rides above everything, with the row below as its manual control.
-     Since 2026-08-09 a ProPresenter clear takes it down too ("F1 clears everything"), so this
-     row is no longer the ONLY way it comes off — but it is still the only way to force it UP
-     over a cleared screen (see _clearOver in logoSetVisible), and it remains honest and
-     immediate: clicks go straight to air with no TAKE. */
-  function logoEls(cfg){ return ((cfg&&cfg.elements)||[]).filter(e=>e&&e.type==="logo"); }
+  /* ---- LAYERS row: one show/hide button per layer, straight to air ----
+     Born as the Logo / Slogan row and generalised at Brandon's request: EVERY layer gets the
+     same immediate on/off control. Clicks go straight to air with no TAKE (applied to both
+     Preview and Program, like the logo button always did), and the button reports what the
+     PROGRAM monitor is actually painting — pgStage mirrors the OBS output exactly, so
+     r.isVisible() is ground truth, not a guess from the config. That matters because an
+     ARMED layer can still be off air for three different reasons, and the operator standing
+     at an empty screen needs the button to say which:
+       ● ON AIR                    painted right now; click hides it
+       ◐ cleared by F1 / F2        a ProPresenter clear is holding it down (next slide
+                                   returns it; click twice to force it up now — _clearOver)
+       ◐ waiting for its slide     bound to a label/group the live slide doesn't carry
+       ◐ standby                   armed but nothing to show (no live verse, empty content,
+                                   a rule, or its linked element is down)
+       ○ off                       hidden by hand; click to show */
   function renderLogoRow(){
     const row=$("logoRow"), box=$("logoBtns"); if(!row||!box) return;
     // Driven off PROGRAM, not Preview: this row reports what OBS is actually showing.
-    const els=logoEls(program), live=new Set(els.map(e=>e.id));
-    // A logo that has been ADDED but not taken yet would otherwise leave this row empty
-    // while the builder clearly shows the element — which reads as the feature being
-    // broken. List it, greyed, saying what it is waiting for.
-    const pending=logoEls(preview).filter(e=>!live.has(e.id));
+    const els=((program&&program.elements)||[]).filter(Boolean), live=new Set(els.map(e=>e.id));
+    // A layer that has been ADDED but not taken yet would otherwise be missing from this row
+    // while the builder clearly shows the element — which reads as the feature being broken.
+    // List it, greyed, saying what it is waiting for.
+    const pending=((preview&&preview.elements)||[]).filter(e=>e&&!live.has(e.id));
     row.style.display=(els.length||pending.length)?"":"none";
     box.textContent="";
+    const meta=(typeof pgStage.slideMeta==="function")?pgStage.slideMeta():{group:"",label:""};
     els.forEach(e=>{
+      const nm=e.name||TYPE_LABELS[e.type]||e.type;
       const armed=e.visible!==false;
-      // A ProPresenter clear now takes the logo down with everything else (clearGateOk), so
-      // "armed" and "on air" are no longer the same thing. Saying "● ON AIR" for a logo F1
-      // has already cleared is the exact dishonesty this row was built to avoid — the
-      // operator would be looking at an empty screen and a control insisting it is up.
-      // Clicking it ON during a clear sets _clearOver, so an armed logo is genuinely on air
-      // even while ProPresenter holds a clear — this row is the manual override and must not
-      // be a control that visibly does nothing. `held` therefore only describes the case
-      // that override does NOT cover: a logo armed BEFORE the clear arrived.
-      const held=armed && !e.clearImmune && !e._clearOver && _clearKind!=="none";
-      const on=armed && !held;
-      const over=on && !!e._clearOver && _clearKind!=="none";
-      box.append(el("button",{class:"simbtn"+(on?" live":""),
-        text:(e.name||"Logo")+(on?(over?"  ● ON AIR (held up through the clear)":"  ● ON AIR")
-                                 :held?"  ◐ cleared by "+(_clearKind==="all"?"F1":"F2"):"  ○ off"),
-        title:held?("Armed, but ProPresenter's "+(_clearKind==="all"?"Clear All (F1)":"Clear Slide (F2)")+
-                    " has it off air. It comes back on the next slide — or click twice to force it up now.")
-                 :over?"On air over a cleared screen, because you put it up by hand. The next live slide hands control back to ProPresenter. Click to clear it."
-                 :on?"On air — click to clear it":"Click to put it on air",
-        onclick:()=>logoSetVisible(e.id,!armed)}));
+      const r=pgStage.getRenderer(e.id);
+      const isOn=armed && !!r && r.isVisible();
+      const over=isOn && !!e._clearOver && _clearKind!=="none";
+      let label,title;
+      if(!armed){ label="  ○ off"; title="Hidden — click to put it on air (no Take needed)."; }
+      else if(isOn){
+        label=over?"  ● ON AIR (held up through the clear)":"  ● ON AIR";
+        title=over?"On air over a cleared screen, because you put it up by hand. The next live slide hands control back to ProPresenter. Click to clear it."
+                  :"On air — click to clear it (no Take needed).";
+      } else if(_clearKind!=="none" && !(typeof pgStage.clearGateOk==="function"&&pgStage.clearGateOk(e))){
+        label="  ◐ cleared by "+(_clearKind==="all"?"F1":"F2");
+        title="Armed, but ProPresenter's "+(_clearKind==="all"?"Clear All (F1)":"Clear Slide (F2)")+
+              " has it off air. It comes back on the next slide — or click twice to force it up now.";
+      } else if(e.ppMatch && !ppMatches(e.ppMatch,meta)){
+        label="  ◐ waiting for its slide";
+        title="Armed, but bound to \""+String(e.ppMatch).slice(2)+"\" and the live slide doesn't carry it. It goes on air when that slide does. Click to disarm it.";
+      } else {
+        label="  ◐ standby";
+        title="Armed, but it has nothing to show right now — no live verse, empty content, an automation rule, or the element it is linked to is down. Click to disarm it.";
+      }
+      box.append(el("button",{class:"simbtn"+(isOn?" live":""),
+        text:nm+label, title:title,
+        onclick:()=>layerSetVisible(e.id,!armed)}));
     });
     pending.forEach(e=>{
       const b=el("button",{class:"simbtn",style:"opacity:.55",
-        text:(e.name||"Logo")+"  — press Take",
-        title:"This logo is in Preview only. Press TAKE TO AIR to send it to OBS first."});
+        text:(e.name||TYPE_LABELS[e.type]||e.type)+"  — press Take",
+        title:"This layer is in Preview only. Press TAKE TO AIR to send it to OBS first."});
       b.disabled=true; box.append(b);
     });
   }
-  function logoSetVisible(id,on){
+  function layerSetVisible(id,on){
     // Applied to BOTH configs. Program alone would leave TAKE reporting phantom pending
     // changes for the rest of the service; Preview alone would never reach OBS.
     //
@@ -4580,7 +4598,7 @@ if(!isOutput){
     }
     if(t==="logo"){
       return group("Content",[
-        el("p",{class:"hint",text:"Rides above everything and ignores ProPresenter entirely — F1 / Clear All will not touch it. It goes off air only when you clear it from the Logo / Slogan row under the monitors. Leave the text blank and use a PNG or MP4 in Background image / video for a logo bug."}),
+        el("p",{class:"hint",text:"Rides above everything. Its on/off button lives in the Layers row under the monitors — clicks go straight to air, no Take. A ProPresenter Clear All (F1) takes it down with the rest of the screen unless you set the layer to “Always live” in the Layers panel dropdown. Leave the text blank and use a PNG or MP4 in Background image / video for a logo bug."}),
         rowText("Logo text",c.title,(v)=>{c.title=v;onCh();}),
         rowText("Slogan",c.sub,(v)=>{c.sub=v;onCh();}),
         typeGroup("Logo text style",st.title,onCh),
