@@ -30,7 +30,12 @@ const scriptureRef = () => { const w = pgWrap(); return w ? w.querySelector('.r-
 const scriptureBody = () => { const w = pgWrap(); const b = w && w.querySelector('.r-body'); return b ? b.textContent : ''; };
 const scriptureHidden = () => { const w = pgWrap(); const b = w && w.querySelector('.r-body'); return !b || b.style.opacity === '0' || b.style.display === 'none'; };
 const pgEl = (sel) => [...D.querySelectorAll('#pg-scaler .lt-el')].find(x => x.querySelector(sel));
-const pgList = () => { const e = pgEl('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].map(t => t.textContent) : []; };
+// PAINTED chips only, same correction clear_rule_test already carries (see test/_onair.js).
+// A ProPresenter clear now hides the whole list ELEMENT (clearGateOk), and hide()
+// deliberately keeps the last content in the DOM for the out-animation — raw textContent
+// reports a cleared list as still populated.
+const { painted } = require('./_onair');
+const pgList = () => { const e = pgEl('.h-items'); return e ? [...e.querySelectorAll('.h-items .h-chip .tx')].filter(t => painted(t, W, D)).map(t => t.textContent) : []; };
 let pass = 0, fail = 0; const ok = (n, c) => { console.log((c ? 'PASS' : '**FAIL**') + '  ' + n); c ? pass++ : fail++; };
 
 (async () => {

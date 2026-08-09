@@ -202,16 +202,44 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
     const air = () => onAirText(D, W, '#out-scaler');
     ok('logo: on air alongside a live verse', /VICTORY WORSHIP/.test(air()) && /John 3:16/.test(air()));
 
-    // F2 — Clear Slide
+    // F2 — Clear Slide. CHANGED 2026-08-09 at Brandon's request: a clear now takes the
+    // SCREEN down, not just the verse, so the logo goes with it. The Logo / Slogan row is
+    // still the manual override, and the layer is still ARMED — the next live slide brings
+    // it straight back with nothing to re-enable (asserted below).
     slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: true };
     await sleep(700);
-    ok('logo: survives F2 on the output page', /VICTORY WORSHIP/.test(air()));
+    ok('logo: F2 takes it off air with everything else', !/VICTORY WORSHIP/.test(air()));
 
-    // F1 — Clear All. Every visual layer off; the verse must go, the logo must not.
+    // F1 — Clear All. Every visual layer off: nothing at all may remain on air.
     layersObj = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
     await sleep(700);
-    ok('logo: survives F1 (Clear All) on the output page', /VICTORY WORSHIP/.test(air()));
+    ok('logo: F1 (Clear All) takes it off air too', !/VICTORY WORSHIP/.test(air()));
     ok('logo: ...and the verse really did clear', !/John 3:16/.test(air()));
+
+    // The clear is TRANSIENT: it must not have written visible=false, or the operator would
+    // be re-arming the logo by hand after every single clear for the rest of the service.
+    slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true;
+    layersObj = { slide: true, media: true }; await sleep(700);
+    ok('logo: comes back by itself on the next live slide', /VICTORY WORSHIP/.test(air()));
+
+    // ...and the per-element escape hatch genuinely exempts it, so a pre-service countdown
+    // or a permanent watermark can still ride through a clear when the operator asks.
+    {
+      const imm = W.defaultConfig();
+      imm.elements = cfg.elements.map(e => e.id === 'lg1' ? Object.assign({}, e, { clearImmune: true }) : e);
+      imm.conn = cfg.conn; imm._take = 42;
+      pushSSE(imm); await sleep(250);
+      slideText = ''; slideActive = false; presActive = false;
+      layersObj = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
+      await sleep(700);
+      ok('logo: clearImmune rides through F1', /VICTORY WORSHIP/.test(air()));
+      pushSSE(Object.assign({}, cfg, { _take: 43 })); await sleep(250);
+      ok('logo: ...and without it, F1 still clears', !/VICTORY WORSHIP/.test(air()));
+    }
+
+    // put a live verse back so the visible-only assertions below start from on-air
+    slideText = 'John 3:16\nFor God so loved the world.'; slideActive = true; presActive = true;
+    layersObj = { slide: true, media: true }; await sleep(600);
 
     // The operator clears it: same _take, only .visible changed.
     const off = W.defaultConfig();

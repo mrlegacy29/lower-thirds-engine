@@ -17,7 +17,12 @@ const W=dom.window, D=W.document;
 const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
 const click=(n)=>{ if(!n)throw new Error('not found'); n.dispatchEvent(new W.MouseEvent('click',{bubbles:true})); };
 const pgEl=(sel)=>[...D.querySelectorAll('#pg-scaler .lt-el')].find(x=>x.querySelector(sel));
-const pgList=()=>{ const e=pgEl('.h-items'); return e?[...e.querySelectorAll('.h-items .h-chip .tx')].map(t=>t.textContent):[]; };
+// PAINTED chips only, same correction clear_rule_test already carries (see test/_onair.js).
+// A ProPresenter clear now hides the whole list ELEMENT (clearGateOk), and hide()
+// deliberately keeps the last content in the DOM so the out-animation has something to
+// fade — so raw textContent here reports a cleared list as still populated.
+const { painted }=require('./_onair');
+const pgList=()=>{ const e=pgEl('.h-items'); return e?[...e.querySelectorAll('.h-items .h-chip .tx')].filter(t=>painted(t,W,D)).map(t=>t.textContent):[]; };
 const scriptureHidden=()=>{ const e=pgEl('.r-body'); return !e || e.style.opacity==="0"; };
 const scriptureRef=()=>{ const e=pgEl('.r-body'); return e?e.querySelector('.r-ref').textContent:''; };
 const selType=(ty)=>{ const row=[...D.querySelectorAll('.elrow')].find(r=>r.querySelector('.ty')&&r.querySelector('.ty').textContent===ty); click(row.querySelector('.nm')); };

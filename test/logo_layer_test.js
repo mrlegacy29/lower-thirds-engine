@@ -93,22 +93,36 @@ const setText = (inp, v) => { inp.value = v; inp.dispatchEvent(new W.Event('inpu
   // pending changes for the rest of the service.
   ok('...and TAKE does not go pending from it', /ON AIR/i.test(takeLabel()));
 
-  /* ---- NOTHING ProPresenter does may take it down ---- */
+  /* ---- a ProPresenter clear takes it down WITH the screen ----
+     CHANGED 2026-08-09 at Brandon's request ("F1 clears everything"). This used to assert
+     the opposite — that nothing ProPresenter did could touch the logo. The layer is still
+     ARMED through a clear; only its rendering is gated, so the next live slide brings it
+     back with nothing to re-enable. That distinction is what the last two assertions pin,
+     and it is the whole reason the clear is a transient render state rather than a write to
+     .visible: an operator re-arming the logo after every F2 would be worse than the bug. */
   slideText = 'John 3:16\nFor God so loved the world.'; slideActive = true; presActive = true;
   layersObj = { slide: true, media: true }; await sleep(500);
   ok('a live verse does not disturb the logo', /VICTORY WORSHIP/.test(stageText('pg-scaler')));
   // F2 / Clear Slide
   slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: true };
   await sleep(700);
-  ok('F2 (Clear Slide) leaves the logo up', /VICTORY WORSHIP/.test(stageText('pg-scaler')));
+  ok('F2 (Clear Slide) takes the logo off air', !/VICTORY WORSHIP/.test(stageText('pg-scaler')));
+  // ...and the row must SAY so rather than keep claiming ON AIR at an empty screen
+  ok('...and the Logo row reports it as cleared, not ON AIR', /cleared by F2/i.test(btn().textContent));
   // F1 / Clear All — every visual layer off. THIS is the one Brandon cares about.
   layersObj = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
   await sleep(700);
-  ok('F1 (Clear All) leaves the logo up', /VICTORY WORSHIP/.test(stageText('pg-scaler')));
+  ok('F1 (Clear All) takes the logo off air', !/VICTORY WORSHIP/.test(stageText('pg-scaler')));
+  ok('...and the Logo row names F1 as what cleared it', /cleared by F1/i.test(btn().textContent));
   ok('...and the verse really did clear (so the check above means something)',
      !/John 3:16/.test(stageText('pg-scaler')));
+  // Still ARMED: no clear may have written visible=false.
+  slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true;
+  layersObj = { slide: true, media: true }; await sleep(700);
+  ok('the logo returns by itself on the next live slide', /VICTORY WORSHIP/.test(stageText('pg-scaler')));
+  ok('...and the row says ON AIR again', /ON AIR/i.test(btn().textContent));
 
-  /* ---- only the operator's own button takes it down ---- */
+  /* ---- the operator's own button still disarms it outright ---- */
   click(btn()); await sleep(300);
   ok('the operator button clears the logo', !/VICTORY WORSHIP/.test(stageText('pg-scaler')));
   ok('...and says so', /off/i.test(btn().textContent));
@@ -135,11 +149,20 @@ const setText = (inp, v) => { inp.value = v; inp.dispatchEvent(new W.Event('inpu
     click(D.getElementById('btnTrans')); await sleep(350);
     const img = [...D.querySelectorAll('#pg-scaler .lt-media img')].find(i => /church-logo/.test(i.getAttribute('src') || ''));
     ok('an image-only logo renders on the Program monitor', !!img && painted(img, W, D));
-    // ...and it is still immune to a Clear All with media as its only content.
+    // ...and a Clear All takes it down like everything else — the MEDIA path has to obey the
+    // clear gate too, not just the text path. Asserted on the <img> itself: an image-only
+    // logo renders nothing through .s-title, so a text-based check here would pass whether
+    // or not the gate reached the media. (Mutation-tested: exempting type "logo" from
+    // clearGateOk fails exactly this line.)
     layersObj = { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
     slideText = ''; slideActive = false; presActive = false; await sleep(700);
     const img2 = [...D.querySelectorAll('#pg-scaler .lt-media img')].find(i => /church-logo/.test(i.getAttribute('src') || ''));
-    ok('an image-only logo survives Clear All too', !!img2 && painted(img2, W, D));
+    ok('Clear All takes an image-only logo off air too', !img2 || !painted(img2, W, D));
+    // and back on the next slide, media and all
+    slideText = 'John 1:1\nIn the beginning was the Word.'; slideActive = true; presActive = true;
+    layersObj = { slide: true, media: true }; await sleep(700);
+    const img3 = [...D.querySelectorAll('#pg-scaler .lt-media img')].find(i => /church-logo/.test(i.getAttribute('src') || ''));
+    ok('...and the image returns on the next live slide', !!img3 && painted(img3, W, D));
   }
 
   /* ---- deleting it retires the row ---- */

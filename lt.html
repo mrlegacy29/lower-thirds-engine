@@ -195,9 +195,13 @@
   .elrow .ty{font-size:10px;color:var(--faint);font-family:var(--mono);text-transform:uppercase}
   /* ProPresenter label/group binding. max-width keeps a long label from squeezing the
      name out of the row — the full text is still in the dropdown and the tooltip. */
-  .elrow .ppbind{flex:none;width:104px;max-width:104px;height:26px;padding:0 6px;font-size:11px;
+  /* 104 -> 132px: every option now carries an "L·" / "G·" kind prefix, and at 104px the
+     prefix pushed the NAME out of the closed select on anything longer than "Bot Lower 3rd". */
+  .elrow .ppbind{flex:none;width:132px;max-width:132px;height:26px;padding:0 18px 0 6px;font-size:11px;
     border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--muted);
-    font-family:var(--mono);text-overflow:ellipsis}
+    /* overflow+nowrap: text-overflow does nothing without them, so a long binding ran
+       UNDERNEATH the native dropdown arrow instead of eliding. padding-right clears the arrow. */
+    font-family:var(--mono);text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
   .elrow .ppbind:hover{border-color:#46566a;color:var(--ink)}
   /* Bound AND the live slide matches = this is what would be on air right now. */
   .elrow.ppon .ppbind{color:var(--ok);border-color:#2c5740;background:rgba(48,209,88,.08)}
@@ -523,7 +527,12 @@ function boxDefaults(over){return Object.assign({
   border:false, borderColor:"#c9a24b", borderW:2,
   accent:true, accentColor:"#c9a24b", accentW:6, accentSide:"left",
   align:"left", valign:"center",
-  mediaSrc:"", mediaType:"", mediaFit:"cover", mediaZoom:1, mediaX:50, mediaY:50, mediaOpacity:1,
+  // mediaLocal: the operator-typed LOCAL PATH behind an OBS-style linked file. When set,
+  // mediaSrc holds the relay URL ("/media?src=…") that actually serves it; this keeps the
+  // human-readable path so the field can display and re-edit it. In boxDefaults so the
+  // graphics import sanitizer (coerce matches on typeof against this template) lets it
+  // round-trip through export/import.
+  mediaSrc:"", mediaType:"", mediaLocal:"", mediaFit:"cover", mediaZoom:1, mediaX:50, mediaY:50, mediaOpacity:1,
   scrim:0, scrimColor:"#000000", bevel:false, bevelDepth:4, shape:"rect"
 },over||{});}
 
@@ -548,6 +557,11 @@ function createElement(type){
     // ProPresenter binding: "" = every slide, "L:<label>" / "G:<group>" = only while the
     // live slide carries that label / sits in that group. See ppMatches().
     ppMatch:"",
+    // Ride through ProPresenter's clears instead of going off with everything else. OFF by
+    // default so "F1 clears everything" means exactly that out of the box; it exists for the
+    // pre-service countdown or a permanent watermark, which are time-driven rather than
+    // slide-driven. See clearGateOk().
+    clearImmune:false,
     dock:{on:false,to:"",x:120,y:820,w:620,h:160},
     content:{}, style:{}, source:{kind:"manual"} };
   if(type==="scripture"){
@@ -574,14 +588,18 @@ function createElement(type){
     base.showTr=true;
     base.box=boxDefaults({style:"bar",useGrad:false,fill1:"#0b1220",opacity:.85,padX:30,padY:16,accent:true});
   } else if(type==="logo"){
-    // A station-ident layer: church logo, ministry name, a slogan — up over everything and
-    // NOT subject to ProPresenter at all. layer 10 puts it above the lower thirds.
+    // A station-ident layer: church logo, ministry name, a slogan — up over everything.
+    // layer 10 puts it above the lower thirds.
     //
-    // What actually makes it survive F1/F2 is that its content is MANUAL: contentFor never
-    // consults the live slide, so no clear path can empty it. vis:"always" is belt-and-braces
-    // declaring that intent (and is why it appears in the activeBase empty-content guard
-    // alongside the clock) — do not mistake it for the mechanism; a mutation to vis:"auto"
-    // changes nothing, which is exactly why the suite pins F1/F2 behaviour instead of vis.
+    // CHANGED 2026-08-09. This layer used to be outside ProPresenter's reach entirely — no
+    // clear could take it down, because its content is MANUAL and contentFor never consults
+    // the live slide. Brandon asked for the opposite ("F1 clears everything"), so the clear
+    // gate in activeBase now takes it off with the rest of the screen. Two things keep that
+    // from being a loss: the clear is TRANSIENT (the next live slide brings the logo back
+    // with nothing to re-arm), and the Logo / Slogan row can still force it up during a clear
+    // — see logoSetVisible. vis:"always" now means only what it says on the tin: it does not
+    // re-animate on a new verse, and it needs the empty-content guard in activeBase (beside
+    // the clock) so an unconfigured one is not pinned on air.
     //
     // Media (image or mp4) rides on box.mediaSrc like every other element, so a logo can be
     // a PNG, an animated bug, or just type. Ships visible:false so adding one does not
@@ -1699,6 +1717,31 @@ function normLayers(layers){
   else if(typeof layers==="object"){ for(const k in layers){ const on=layerOn(layers[k]); if(on!==null) out[k.toLowerCase()]=on; } }
   return out;
 }
+/* Is the empty-text branch of onSlide a REAL ProPresenter clear, or just a live slide that
+   happens to carry no text? Both arrive as text==="", and the difference matters now that a
+   clear takes the whole screen down (see clearGateOk): treating an image-only or blank slide
+   as a clear would pull every lower third off air with ProPresenter still showing something.
+     active===false -> the slide layer is off: a genuine Clear Slide / Clear All
+     active===null  -> no layers API on this build; empty text is the ONLY clear signal there is
+     active===true  -> a live slide with no text. Not a clear. */
+function isClear(active){ return active!==true; }
+/* Retire the Logo/Slogan row's "show it anyway" override. Called from BOTH onSlide paths the
+   moment a live slide arrives, which is what makes the override transient rather than a
+   setting that quietly exempts the logo from every future Clear All. */
+function dropClearOver(cfg){
+  ((cfg&&cfg.elements)||[]).forEach(e=>{ if(e&&e._clearOver) delete e._clearOver; });
+}
+/* Is this media source a video? ONE definition, used by the renderer AND by the URL field,
+   which had two copies of the same regex that could drift.
+   b.mediaType is the operator's explicit answer and always wins — the extension sniff cannot
+   work on "https://media.church.org/bug" or on a URL carrying a query/fragment, and those
+   were silently rendered into an <img>, which shows nothing at all for a video and gives no
+   way to say otherwise. Measured: an extension-less URL produced child=IMG. */
+function isVideoSrc(src,mediaType){
+  if(mediaType==="video") return true;
+  if(mediaType==="image") return false;
+  return /^data:video/i.test(src||"") || /\.(mp4|webm|ogv|ogg|mov|m4v)(\?|#|$)/i.test(src||"");
+}
 // Decide whether a clear event should wipe the scripture reference list, per the
 // operator's chosen rule. Evaluated only while the slide is in a cleared state.
 function isFullClear(rule, layer, signals){
@@ -1981,6 +2024,7 @@ function makeElRenderer(){
   let def=null, visible=false, token=0, interactive=false;
   let histChips=[]; // [{id,node}] persistent for the event list
   let mediaEl=null, mediaKind="";       // current <img>/<video> child + its kind
+  let mediaFailed="";                   // src that raised an error event, so it is reported once
   let loopAnims=[], loopSig="";          // continuous-motion handles
   let marqOn=false, marqTrack=null, marqSig="";  // is content currently a ticker/roll track
 
@@ -2015,19 +2059,42 @@ function makeElRenderer(){
     const src=b.mediaSrc||"";
     if(!src){ if(mediaEl){mediaEl.remove();mediaEl=null;mediaKind="";} media.style.display="none"; media.style.backgroundImage="none"; return; }
     media.style.display="block";
-    const isVid=(b.mediaType==="video")|| /^data:video|\.(mp4|webm|ogv|mov)(\?|$)/i.test(src);
+    const isVid=isVideoSrc(src,b.mediaType);
     const kind=isVid?"video":"image";
     if(kind!==mediaKind){ if(mediaEl)mediaEl.remove();
       mediaEl=isVid?el("video",{autoplay:true,loop:true,playsinline:true}):el("img",{alt:""});
       if(isVid){ mediaEl.muted=true; mediaEl.setAttribute("muted",""); }
+      // A media source that 404s, is blocked, or is a codec this build cannot play used to
+      // fail in complete silence: the plate animates in around a hole, and the operator sees
+      // an empty box on air with nothing anywhere saying why. Record it on the element so the
+      // inspector can say so, and log it once — the OUTPUT page cannot show a dialog, and a
+      // dialog is the last thing anyone wants mid-service.
+      mediaEl.addEventListener("error",()=>{
+        if(mediaFailed===src) return;
+        mediaFailed=src;
+        try{ console.error("[lower-thirds] media failed to load: "+String(src).slice(0,120)); }catch(e){}
+      });
+      mediaEl.addEventListener("load",()=>{ if(mediaFailed===src) mediaFailed=""; });
+      mediaEl.addEventListener("loadeddata",()=>{ if(mediaFailed===src) mediaFailed=""; });
       media.appendChild(mediaEl); mediaKind=kind; }
-    if(mediaEl.getAttribute("src")!==src) mediaEl.setAttribute("src",src);
+    if(mediaEl.getAttribute("src")!==src){ mediaFailed=""; mediaEl.setAttribute("src",src); }
     const fit=b.mediaFit||"cover";
-    if(fit==="tile"){ mediaEl.style.display="none";
-      media.style.backgroundImage=`url("${src}")`; media.style.backgroundRepeat="repeat";
+    // "tile" paints the CSS background of the container and hides the child — which for a
+    // VIDEO means nothing renders at all, because CSS cannot tile a video. Fall back to the
+    // nearest thing that does work rather than going black.
+    if(fit==="tile"&&!isVid){ mediaEl.style.display="none";
+      // Escape the source before it goes into a url("...") token. It is operator-typed (and
+      // arrives from imported looks and broadcast configs), so a quote or a backslash in it
+      // would terminate the token and let the rest be parsed as CSS.
+      const esc=String(src).replace(/["\\]/g,c=>"\\"+c).replace(/[\n\r]/g,"");
+      media.style.backgroundImage=`url("${esc}")`; media.style.backgroundRepeat="repeat";
       media.style.backgroundSize=(100*(b.mediaZoom||1))+"px auto"; media.style.backgroundPosition="center"; }
     else { media.style.backgroundImage="none"; mediaEl.style.display="block";
-      mediaEl.style.objectFit=(fit==="stretch")?"fill":(fit==="center")?"none":fit;
+      // An unrecognised fit silently became "fill" (a stretched, distorted image), because
+      // objectFit rejects the value and the browser keeps whatever was there. Name the ones
+      // that are real CSS and treat anything else as the documented default.
+      const OFIT={cover:"cover",contain:"contain",stretch:"fill",center:"none",tile:"contain"};
+      mediaEl.style.objectFit=OFIT[fit]||"cover";
       const fx=(b.mediaX==null?50:b.mediaX), fy=(b.mediaY==null?50:b.mediaY);
       mediaEl.style.objectPosition=`${fx}% ${fy}%`;
       mediaEl.style.transform=`scale(${b.mediaZoom||1})`; mediaEl.style.transformOrigin=`${fx}% ${fy}%`; }
@@ -2413,10 +2480,22 @@ function makeElRenderer(){
     root.style.opacity="1"; root.style.transform="none"; root.style.filter="none";
     if(a.in==="wipe")root.style.clipPath="inset(0 0 0 0)";
     visible=true; if(my!==token)return;
+    playMedia(true);
     applyLoop(d);
+  }
+  /* An off-air <video> used to keep decoding for the whole service — hide() only fades the
+     WRAPPER, and a paused-looking element that is still playing costs real CPU on the box
+     that is also running ProPresenter and OBS. Four background videos in a look meant four
+     decoders running behind an opacity:0 div from boot until shutdown. Pausing also means a
+     looping bug restarts cleanly at its first frame when it comes back rather than resuming
+     wherever it happened to be. */
+  function playMedia(on){
+    if(!mediaEl||mediaKind!=="video")return;
+    try{ if(on){ const p=mediaEl.play(); if(p&&p.catch)p.catch(()=>{}); } else mediaEl.pause(); }catch(e){}
   }
   function hide(){
     cancelLoop();
+    playMedia(false);
     if(!visible){ root.style.opacity="0"; return; }
     const a=def.anim; const my=++token;
     root.style.transition=`opacity ${a.durOut}ms ${a.easing},transform ${a.durOut}ms ${a.easing},clip-path ${a.durOut}ms ${a.easing},filter ${a.durOut}ms ${a.easing}`;
@@ -2504,6 +2583,12 @@ function createStage(scaler,opts){
   // ProPresenter group / slide label of the live slide. Rules can match on these, so a
   // look routes by WHERE the operator filed the slide in PP rather than by its wording.
   let slideMeta={group:"",label:""};
+  /* What ProPresenter has cleared, right now: "none" | "slide" (F2 / Clear Slide) | "all"
+     (F1 / Clear All). This is a TRANSIENT render state, deliberately NOT written back onto
+     the elements: a clear must take the screen down, and the next live slide must bring it
+     all back with nothing to re-arm by hand. Writing visible=false instead would leave the
+     operator re-enabling eight elements every single service. See clearGateOk(). */
+  let clearKind="none";
   let dataVars={}; // {name:value} from bound live-data sources
   let timers=[];   // live ProPresenter timer objects, for clock elements in "pptimer" mode
   let history=[];
@@ -2534,6 +2619,15 @@ function createStage(scaler,opts){
       const c=subVars(d.content||{}), b=d.box||{};
       const empty=!String(c.title||"").trim() && !String(c.sub||"").trim() && !String(b.mediaSrc||"").trim();
       if(empty && !interactive) return null;     // still shown in the builder, to position it
+      return {};
+    }
+    if(d.type==="media"){
+      // An Image/Media element IS its media — it has no text of its own, so with no source it
+      // has nothing whatsoever to say. It used to fall through to the manual `return {}` at
+      // the bottom, which meant "on air", so adding one and not yet picking a file pinned a
+      // styled empty box on the OBS output. Same rule and same reason as the logo above and
+      // the QR below: still shown in the builder so it can be placed.
+      if(!String((d.box||{}).mediaSrc||"").trim() && !interactive) return null;
       return {};
     }
     if(d.type==="eventList"){ const lines=String(subVars(d.content||{}).items||"").split("\n").map(s=>s.trim()).filter(Boolean);
@@ -2613,9 +2707,69 @@ function createStage(scaler,opts){
     if(interactive) return true;
     return ppMatches(d&&d.ppMatch, slideMeta);
   }
+  /* A ProPresenter clear takes the SCREEN down, not just the verse.
+     Before this, contentFor() returned {} for every MANUAL-source element — a sermon title,
+     a name/title, a text box, a bullet list, an event list, a QR code, a clock, a logo — so
+     activeBase() said "on air" and none of them could ever be cleared from ProPresenter.
+     Measured on the real page: after F1 the ONLY thing that came off was the reference list;
+     thirteen other markers were still painted. The operator's F1 did not clear the screen.
+
+     The rule now matches what the keys are called:
+       F1 / Clear All   -> nothing survives. Ends the session.
+       F2 / Clear Slide -> the RUNNING LISTS survive, entries AND their heading, because they
+                           are the record of where the sermon has been and taking them down
+                           between points is exactly what they exist not to do. Only F1 ends
+                           the session and takes them away. (The reference list's F1 behaviour
+                           still honours its own "Clear this list on Clear All" toggle — see
+                           histWantsClear.)
+     Both list types are exempt, not just the scripture one: "Scripture reference list"
+     (history) and "Event list" (eventList) are the same control in two flavours — a standing
+     list that accumulates through the service — and an operator who put their running order
+     in the Event list means the same thing by it. F1 still clears both.
+     The list HEADING rides on the same exemption: it is drawn by the list element itself, so
+     exempting the element keeps "Previously Referenced" up with its entries. headerHold
+     (set from onSlide) is what decides whether the heading shows when the list is EMPTY, and
+     it already holds through F2 and drops on F1.
+     One escape hatch, off by default: d.clearImmune ("Stay on air through ProPresenter
+     clears"), for the pre-service countdown or a watermark that genuinely should ride
+     through. Default false, so the plain reading of "F1 clears everything" is what happens
+     out of the box.
+
+     Inert in the interactive builder, exactly like ppGateOk above and for the same reason:
+     the operator builds the look with nothing live at all, and an element that vanished
+     from the builder could never be positioned. The Program monitor is non-interactive, so
+     it still shows precisely what OBS is showing. */
+  function clearGateOk(d){
+    if(interactive) return true;
+    if(clearKind==="none") return true;
+    if(!d) return false;
+    if(d.clearImmune) return true;
+    // A deliberate operator override, set by the Logo / Slogan row when it is clicked ON
+    // while a clear is holding the screen down. Without it that button is a DEAD CONTROL in
+    // the one situation it exists for: the service has ended, ProPresenter is cleared, and
+    // the operator wants the church logo up on a blank screen. It is transient — both
+    // onSlide paths strip it the moment a live slide arrives — so the next F1 clears the
+    // logo again and "F1 clears everything" keeps meaning what it says.
+    if(d._clearOver) return true;
+    // The Event list is a standing running-order list, not slide-driven content: F2 leaves it
+    // exactly as it was, F1 ends the session and takes it. It has no clearOnAll toggle of its
+    // own, so F1 always clears it.
+    if(d.type==="eventList") return clearKind==="slide";
+    if(d.type==="history"){
+      if(clearKind==="slide") return true;
+      // On F1 the list obeys the toggle it has always had ("Clear this list on ProPresenter
+      // Clear All"). Turning it OFF has always meant "this list survives a full clear", and
+      // the histWantsClear() paths already honour that by not emptying its CONTENTS — so
+      // blanking the element here would have left the operator with a list that still held
+      // every reference and could not be seen.
+      return d.clearOnAll===false;
+    }
+    return false;
+  }
   function activeBase(d){
     if(!d || d.visible===false) return false;
     if(!ppGateOk(d)) return false;
+    if(!clearGateOk(d)) return false;
     // A rule takes precedence over the element's own visibility mode, but NOT over
     // the operator's eye toggle above — hiding something by hand must always win.
     if(ruleState && Object.prototype.hasOwnProperty.call(ruleState,d.id)){
@@ -2758,6 +2912,15 @@ function createStage(scaler,opts){
   function stopClockTick(){ if(clockTimer){clearInterval(clockTimer);clockTimer=null;} }
   let headerHold=false;   // keep the ref-list header visible even when the list is empty (set on a Clear-Slide / partial clear)
   function setHeaderHold(v){ v=!!v; if(headerHold!==v){ headerHold=v; renderAll(); } }
+  /* Called from BOTH onSlide paths (output page and console) on every poll — see clearGateOk.
+     Anything but "all"/"slide" means nothing is cleared, so a caller that has not been
+     updated cannot accidentally blank the output. */
+  function setCleared(k){ const n=(k==="all"||k==="slide")?k:"none"; if(clearKind===n)return; clearKind=n;
+    // clearGateOk is inert in the interactive builder, so a repaint here would change
+    // nothing on screen — it would only throw away work at the worst moment. renderAll()
+    // rebuilds every element, and this fires on every clear ProPresenter sends, i.e.
+    // repeatedly while the operator may be mid-drag on the preview stage.
+    if(!interactive) renderAll(); }
   // Re-play entrance on visible content elements (used by TAKE so animation changes are visible).
   // Persistent / always-on elements (logos, watermarks) are intentionally skipped.
   function replayVisible(){
@@ -2804,8 +2967,11 @@ function createStage(scaler,opts){
   function clampN(v,a,b){return Math.max(a,Math.min(b,v));}
 
   startClockTick();
-  return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,setSlideMeta,select,setScale,replayVisible,
+  return { setConfig,setLive,setTimers,setVars,setHistory,setHeaderHold,setSlideMeta,setCleared,select,setScale,replayVisible,
     hasClock, stopClockTick,
+    // What ProPresenter has cleared right now ("none"|"slide"|"all"). The console's Logo /
+    // Slogan row reads it so an armed-but-cleared logo cannot keep claiming "ON AIR".
+    clearKind:()=>clearKind,
     // Is an automation rule currently holding this element? null = no rule has an opinion.
     // The Layers panel needs this to stop claiming "Visible" for something a rule is
     // holding off air, and to explain why its eye toggle appears to do nothing.
@@ -2870,8 +3036,23 @@ if(isOutput){
       if(full && histWantsClear()){ history.length=0; stage.setHistory(history); }
       if(full) everShown=false;                                // a full clear ends the session
       stage.setHeaderHold(everShown && !full);                 // hold the header on a Clear Slide, hide it on a Clear All
+      // Take the rest of the screen down too. BEFORE setLive so the single render that
+      // follows already knows the clear state — otherwise a manual element paints for one
+      // frame after the clear, which on a hard cut is a visible flash on air.
+      //
+      // NOT on !text alone. This branch also runs for a live slide that simply HAS no text —
+      // an image-only slide, a blank slide in the middle of a deck — and blanking the whole
+      // screen for one of those would take every lower third off air mid-service with
+      // ProPresenter showing something. The slide LAYER is the discriminator: active===false
+      // is a real clear, active===null is the no-layers-API text-mode fallback (where empty
+      // text IS the only clear signal there is), and active===true is a live blank slide.
+      stage.setCleared(isClear(active)?(full?"all":"slide"):"none");
       stage.setLive(null); return;
     }
+    // Live slide: everything comes back, and any manual "show it anyway" override from the
+    // Logo / Slogan row retires here — that is what keeps it transient, so the NEXT F1 still
+    // clears the logo.
+    dropClearOver(program); stage.setCleared("none");
     // A live slide must NOT raise the header on its own. This used to be an unconditional
     // setHeaderHold(true), so ANY text on air — a worship-song lyric, a sermon point, an
     // announcement — put an empty "Previously Referenced" plate on air and left it there for
@@ -2902,7 +3083,13 @@ if(isOutput){
     // restart every poll and re-hit the endpoints
     const nextSrc=JSON.stringify((merged.data&&merged.data.sources)||[]);
     if(nextSrc!==lastDataSrc){ lastDataSrc=nextSrc; dataFeed.setSources((merged.data&&merged.data.sources)||[]); }
-    if(connChanged){ pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
+    if(connChanged){ pp.stop();
+      // Clearing the host STRANDS the output otherwise: the clear state is only ever changed
+      // by the poller, so a config saved while ProPresenter had everything cleared would
+      // leave OBS showing a blank 1920x1080 layer with nothing able to bring it back short
+      // of reloading /output. No poller means nothing is asserting a clear, so release it.
+      if(!program.conn.host) stage.setCleared("none");
+      else pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
     if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }  // manual "Clear list": drop the HEADER too, or a bare plate is left on air
     if(merged._take && merged._take!==lastTake){ lastTake=merged._take; stage.replayVisible(); }
   });
@@ -2916,7 +3103,10 @@ if(isOutput){
     pp.setWantTimers(wantsPpTimers(program));
     { const sig=JSON.stringify((program.data&&program.data.sources)||[]);
       if(sig!==lastDataSrc){ lastDataSrc=sig; dataFeed.setSources((program.data&&program.data.sources)||[]); } }
-    if(cc){pp.stop(); if(program.conn.host)pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);}
+    // Same release-the-clear rule as the SSE path above — this fallback runs when the relay
+    // is unreachable, which is exactly when a stranded blank output is hardest to diagnose.
+    if(cc){pp.stop(); if(!program.conn.host) stage.setCleared("none");
+      else pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);}
     if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }
     if(c._take && c._take!==lastTake){ lastTake=c._take; stage.replayVisible(); } }catch(err){} } });
 
@@ -3014,6 +3204,11 @@ if(!isOutput){
   let liveLog=[], logId=0;
   // console-side twin of the output page's everShown — see the header rule in the poll below
   let logEverShown=false;
+  // What ProPresenter has cleared right now, mirroring the PROGRAM monitor (i.e. what OBS is
+  // doing). Only the Logo / Slogan row reads it — that row reports what is ACTUALLY on air,
+  // and a logo the operator armed but that F1 has since taken down must not keep saying
+  // "● ON AIR". Rendering still gates on the stage's own copy, not this one.
+  let _clearKind="none";
   function pushLog(ref){ if(!ref)return; const last=liveLog[liveLog.length-1]; if(last&&last.ref===ref)return;
     liveLog.push({id:++logId,ref}); pvStage.setHistory(liveLog); pgStage.setHistory(liveLog); }
   // NOTE: this runs on EVERY clear, including a Clear SLIDE — so it must NOT touch
@@ -3078,6 +3273,23 @@ if(!isOutput){
     pvStage.setSlideMeta((signals&&signals.group)||"",(signals&&signals.label)||"");
     // Cheap class flip on the Layers rows — see refreshPpRows for why this is not renderPanels.
     if(typeof refreshPpRows==="function") refreshPpRows();
+    // Clear state BEFORE setLive, matching the output page. setLive() triggers a full
+    // renderAll, so computing the clear afterwards meant one render with the PREVIOUS clear
+    // state — a one-frame flash of the whole screen coming back on the Program monitor at
+    // the instant of an F1. The two paths must also simply agree: they are twins, and every
+    // time they have drifted it has cost a bug.
+    {
+      const _pgcn0=(program&&program.conn)||{}, _pvcn0=(preview&&preview.conn)||{};
+      if(!text && isClear(active)){
+        pgStage.setCleared(isFullClear(_pgcn0.clearRule||"all",_pgcn0.clearLayer||"media",signals)?"all":"slide");
+        pvStage.setCleared(isFullClear(_pvcn0.clearRule||"all",_pvcn0.clearLayer||"media",signals)?"all":"slide");
+      } else {
+        // A live slide retires the Logo row's manual "show it anyway" override on BOTH
+        // configs, so it cannot survive into the next Clear All.
+        dropClearOver(preview); dropClearOver(program);
+        pgStage.setCleared("none"); pvStage.setCleared("none");
+      }
+    }
     pgStage.setLive(liveData); setTally({el:$("pgTitle")}, !!liveData);
     if(liveMode){ pvStage.setLive(liveData); setTally(pvMonTally,!!liveData); }
     if(sc&&sc.ref)pushLog(sc.ref);                               // log AFTER setLive (clean exclude-live)
@@ -3102,13 +3314,25 @@ if(!isOutput){
       // disagreed with what OBS was actually doing.
       if(_pgFull) logEverShown=false;                          // a full clear ends the session
       pgStage.setHeaderHold(logEverShown&&!_pgFull); pvStage.setHeaderHold(logEverShown&&!_pvFull);
+      // Take the rest of the screen down — see clearGateOk. Each monitor is told the clear
+      // its OWN config computes, for the same reason setHeaderHold is: the Program monitor
+      // must agree with OBS (which keys off program.conn), and an un-taken clear-rule edit
+      // in Preview must not make the two disagree about what is on air.
+      // The stages were already told the clear above (before setLive, so the render that
+      // followed knew about it). This only records it for the Logo / Slogan row, which
+      // mirrors PROGRAM — i.e. what OBS is doing.
+      // isClear(): this branch also runs for a live slide with no text at all — see the
+      // output page's onSlide for why blanking the screen for one of those is wrong.
+      _clearKind=isClear(active)?(_pgFull?"all":"slide"):"none";
     } else {
       // Same rule as the output page (onSlide): live text alone must not raise the header,
       // or an empty list plate rides on air through every song. Both render paths must agree
       // or the console monitors stop matching what OBS is showing.
       if(sc&&sc.ref) logEverShown=true;
       pgStage.setHeaderHold(logEverShown); pvStage.setHeaderHold(logEverShown);
+      _clearKind="none";                                       // live slide: everything comes back
     }
+    renderLogoRow();   // an armed-but-cleared logo must stop claiming "ON AIR"
     $("stSlide")&&($("stSlide").textContent=text?(text.length>42?text.slice(0,42)+"\u2026":text):"(clear)");
     $("stLayer")&&($("stLayer").textContent=active===null?"n/a (text mode)":active?"slide ON":"slide CLEAR");
     const on=(active===null)?!!text:!!active;
@@ -3165,13 +3389,21 @@ if(!isOutput){
     const need=(c)=>(c&&c.elements||[]).some(d=>d&&d.type==="clock"&&d.content&&d.content.mode==="pptimer");
     try{ pp.setWantTimers(need(preview)||need(program)); }catch(e){}
   }
-  function startConsolePP(){ pp.stop(); refreshWantTimers(); if(preview.conn.host){ pp.connect(preview.conn.host,preview.conn.port,preview.conn.pollMs); _ppConnSig=JSON.stringify(preview.conn); } }
+  function startConsolePP(){ pp.stop(); refreshWantTimers();
+    if(preview.conn.host){ pp.connect(preview.conn.host,preview.conn.port,preview.conn.pollMs); _ppConnSig=JSON.stringify(preview.conn); }
+    else {
+      // No host = no poller = nothing asserting a clear. Same release rule as the output
+      // page's conn handling: left in place, a clear latched before the disconnect kept the
+      // monitors blank (and the Logo row saying "cleared") with nothing able to lift it.
+      _clearKind="none"; pgStage.setCleared("none"); pvStage.setCleared("none"); renderLogoRow();
+    } }
 
   /* ---- LOGO / SLOGAN layer ----
-     A station ident that rides above everything and is deliberately outside ProPresenter's
-     reach: it ships vis:"always", so a Clear All (F1) does not touch it. That makes THIS
-     row the only thing that can take it down, which is the whole point — but it also means
-     the control has to be honest and immediate, not something you have to remember to TAKE. */
+     A station ident that rides above everything, with the row below as its manual control.
+     Since 2026-08-09 a ProPresenter clear takes it down too ("F1 clears everything"), so this
+     row is no longer the ONLY way it comes off — but it is still the only way to force it UP
+     over a cleared screen (see _clearOver in logoSetVisible), and it remains honest and
+     immediate: clicks go straight to air with no TAKE. */
   function logoEls(cfg){ return ((cfg&&cfg.elements)||[]).filter(e=>e&&e.type==="logo"); }
   function renderLogoRow(){
     const row=$("logoRow"), box=$("logoBtns"); if(!row||!box) return;
@@ -3184,11 +3416,26 @@ if(!isOutput){
     row.style.display=(els.length||pending.length)?"":"none";
     box.textContent="";
     els.forEach(e=>{
-      const on=e.visible!==false;
+      const armed=e.visible!==false;
+      // A ProPresenter clear now takes the logo down with everything else (clearGateOk), so
+      // "armed" and "on air" are no longer the same thing. Saying "● ON AIR" for a logo F1
+      // has already cleared is the exact dishonesty this row was built to avoid — the
+      // operator would be looking at an empty screen and a control insisting it is up.
+      // Clicking it ON during a clear sets _clearOver, so an armed logo is genuinely on air
+      // even while ProPresenter holds a clear — this row is the manual override and must not
+      // be a control that visibly does nothing. `held` therefore only describes the case
+      // that override does NOT cover: a logo armed BEFORE the clear arrived.
+      const held=armed && !e.clearImmune && !e._clearOver && _clearKind!=="none";
+      const on=armed && !held;
+      const over=on && !!e._clearOver && _clearKind!=="none";
       box.append(el("button",{class:"simbtn"+(on?" live":""),
-        text:(e.name||"Logo")+(on?"  ● ON AIR":"  ○ off"),
-        title:on?"On air — click to clear it":"Click to put it on air",
-        onclick:()=>logoSetVisible(e.id,!on)}));
+        text:(e.name||"Logo")+(on?(over?"  ● ON AIR (held up through the clear)":"  ● ON AIR")
+                                 :held?"  ◐ cleared by "+(_clearKind==="all"?"F1":"F2"):"  ○ off"),
+        title:held?("Armed, but ProPresenter's "+(_clearKind==="all"?"Clear All (F1)":"Clear Slide (F2)")+
+                    " has it off air. It comes back on the next slide — or click twice to force it up now.")
+                 :over?"On air over a cleared screen, because you put it up by hand. The next live slide hands control back to ProPresenter. Click to clear it."
+                 :on?"On air — click to clear it":"Click to put it on air",
+        onclick:()=>logoSetVisible(e.id,!armed)}));
     });
     pending.forEach(e=>{
       const b=el("button",{class:"simbtn",style:"opacity:.55",
@@ -3200,7 +3447,21 @@ if(!isOutput){
   function logoSetVisible(id,on){
     // Applied to BOTH configs. Program alone would leave TAKE reporting phantom pending
     // changes for the rest of the service; Preview alone would never reach OBS.
-    const apply=(cfg)=>{ ((cfg&&cfg.elements)||[]).forEach(e=>{ if(e&&e.id===id) e.visible=!!on; }); };
+    //
+    // _clearOver is what makes this button work while ProPresenter is holding a clear. F1
+    // now takes the logo down with everything else, so without it, clicking "on" after the
+    // service ended would arm a logo that the clear gate immediately suppressed — a control
+    // that visibly does nothing, which is worse than the behaviour it replaced. It is
+    // transient (any live slide strips it), so it cannot leak into next week's F1.
+    // ONLY while a clear is actually holding the screen. Setting it on every "on" click left
+    // the flag armed from ordinary use (click during a live slide, no key change strips it),
+    // and the NEXT Clear All then spared the logo — quietly reintroducing the exemption this
+    // change removed.
+    const wantOver=!!on && _clearKind!=="none";
+    const apply=(cfg)=>{ ((cfg&&cfg.elements)||[]).forEach(e=>{ if(e&&e.id===id){
+      e.visible=!!on;
+      if(wantOver) e._clearOver=true; else delete e._clearOver;
+    } }); };
     apply(preview); savePreview();
     apply(program); lsSet(LS_PROGRAM,program);
     // Deliberately does NOT bump _take: the output page replays every entrance on a new
@@ -3244,7 +3505,12 @@ if(!isOutput){
   // "ON AIR" while the output kept polling the old IP and no verse ever reached OBS.
   // _clearHist IS stripped — it is a fire-and-forget nonce echoed back by the relay's own SSE,
   // and counting it left TAKE stuck on "pending" after "Clear scripture list now".
-  function cfgSansMeta(c){ const x=clone(c||{}); delete x._take; delete x._clearHist; return JSON.stringify(x); }
+  // _clearOver is stripped for the same reason as the other two: it is a transient render
+  // hint set on BOTH configs by the Logo / Slogan row and retired by the next live slide, so
+  // counting it would flip TAKE to "pending" over something that is not un-taken work.
+  function cfgSansMeta(c){ const x=clone(c||{}); delete x._take; delete x._clearHist;
+    ((x.elements)||[]).forEach(e=>{ if(e) delete e._clearOver; });
+    return JSON.stringify(x); }
   function updateTakeState(){
     const pending = cfgSansMeta(preview)!==cfgSansMeta(program);
     const b=$("btnTrans"); if(b){ b.classList.toggle("pending",pending); b.classList.toggle("synced",!pending);
@@ -3343,50 +3609,133 @@ if(!isOutput){
   /* One element's ProPresenter binding, as it appears beside the name in the Layers list.
      Repaints itself in place when a new deck brings new labels in, so the operator can add
      a label in ProPresenter and pick it here without reopening anything. */
+  /* A slide LABEL and a GROUP can carry the SAME NAME — "Verse" is a perfectly ordinary
+     name for both — and the two route completely differently. The old dropdown printed both
+     as bare text under two optgroup headings, so the closed select (104px, showing only the
+     selected option) read "Verse" with no way to tell which kind was bound, and the open
+     list relied on the operator tracking which heading they had scrolled past.
+     Every option now carries its kind INLINE as "L·" / "G·", which survives the closed
+     state, truncation, and the fact that <option> text cannot be styled per-option in
+     Chrome on Windows. The headings say where each kind comes from and how many there are,
+     because "no labels yet" and "labels not loaded" look identical otherwise. */
+  const PP_KIND_PFX={ "L:":"L·", "G:":"G·" };
+  function ppOptText(val){
+    const k=String(val||"").slice(0,2), nm=String(val||"").slice(2);
+    return (PP_KIND_PFX[k]||"")+nm;
+  }
+  /* Two more per-layer answers to "when does this layer show?", requested for the logo:
+     ALWAYS LIVE and NEVER SHOW. Sentinels like the type-a-label ones, but these are STATES,
+     not bindings — they map onto the model fields that already exist and are already
+     mutation-tested rather than adding a parallel mechanism:
+       Always live  = visible:true + clearImmune:true + ppMatch:"" — nothing ProPresenter
+                      does (F1, F2, slide routing) takes it off air. The one thing that still
+                      can is the element having literally nothing to show (contentFor null):
+                      forcing an EMPTY plate on air is the lesson this codebase has already
+                      paid for twice (the clock and the logo guards in activeBase).
+       Never show   = visible:false — the same field as the row's eye toggle, so the eye and
+                      the dropdown can never disagree.
+     Picking a binding (or "Any slide") afterwards restores visible and drops the immunity —
+     the options are mutually exclusive readings of the same question, so choosing one must
+     mean leaving the others. */
+  const PP_ALWAYS=" alwaysLive", PP_NEVER=" neverShow";
+  // What the closed select should DISPLAY for this element's current state. Immunity only
+  // reads as "Always live" when nothing else gates the layer — an element that is bound AND
+  // clear-immune (set via the inspector toggle) shows its binding here, because the binding
+  // still decides when it is on air.
+  function ppEffValue(d){
+    if(d.visible===false) return PP_NEVER;
+    // vis "linked" outranks immunity in the renderer (the element follows its target), so it
+    // must outrank it here too or the closed select would claim "Always live" for a layer
+    // that is in fact riding another element's visibility.
+    if(d.clearImmune && !d.ppMatch && d.vis!=="linked") return PP_ALWAYS;
+    return String(d.ppMatch||"");
+  }
   function ppBindSelect(d){
     const s=el("select",{class:"ppbind"});
     const paint=()=>{
       const cur=String(d.ppMatch||"");
+      const meta=(typeof pgStage.slideMeta==="function")?pgStage.slideMeta():{group:"",label:""};
       s.textContent="";
       s.append(el("option",{value:"",text:"Any slide"}));
+      // AFTER "Any slide" (the default stays the first thing the eye lands on), BEFORE the
+      // bindings it overrides.
+      {
+        const og=el("optgroup"); og.label="Show this layer";
+        og.append(el("option",{value:PP_ALWAYS,text:"● Always live / on"}));
+        og.append(el("option",{value:PP_NEVER,text:"○ Never show"}));
+        s.append(og);
+      }
+      /* Bind to WHAT IS ON SCREEN RIGHT NOW, in one click. This is the differentiator that
+         actually saves time on a Sunday: the operator clicks the slide in ProPresenter, then
+         picks it here without having to know or remember whether they filed it as a label or
+         a group — both are offered, each named as what it is. Repainted on slide change by
+         refreshPpRows(), which deliberately skips a select the operator has focused. */
+      const liveL=String(meta.label||"").trim(), liveG=String(meta.group||"").trim();
+      if(liveL||liveG){
+        const og=el("optgroup"); og.label="● On the live slide";
+        if(liveL) og.append(el("option",{value:"L:"+liveL,text:"L·"+liveL}));
+        if(liveG) og.append(el("option",{value:"G:"+liveG,text:"G·"+liveG}));
+        s.append(og);
+      }
       const grp=(lbl,vals,pfx)=>{
         if(!vals.length) return;
-        const og=el("optgroup"); og.label=lbl;
-        vals.forEach(v=>og.append(el("option",{value:pfx+v,text:v})));
+        const og=el("optgroup"); og.label=lbl+"  ("+vals.length+")";
+        vals.forEach(v=>og.append(el("option",{value:pfx+v,text:(PP_KIND_PFX[pfx]||"")+v})));
         s.append(og);
       };
-      grp("Slide labels",ppLib.labels,"L:");
-      grp("Groups",ppLib.groups,"G:");
+      grp("L· Slide labels — from decks you have opened",ppLib.labels,"L:");
+      grp("G· Groups — ProPresenter's library",ppLib.groups,"G:");
       // A binding whose label is not in the library yet — a look imported from another
       // machine, or one saved before this deck was ever opened here — must still show
       // what it is bound to. Without this the select falls back to the first option and
       // SILENTLY REPORTS "Any slide" for an element that is in fact gated.
       if(cur && !Array.prototype.some.call(s.querySelectorAll("option"),o=>o.value===cur)){
         const og=el("optgroup"); og.label="Not in the current deck";
-        og.append(el("option",{value:cur,text:cur.slice(2)||cur}));
+        og.append(el("option",{value:cur,text:ppOptText(cur)||cur}));
         s.append(og);
       }
       const og2=el("optgroup"); og2.label="Not listed?";
       og2.append(el("option",{value:PP_ASK_L,text:"Type a label…"}));
       og2.append(el("option",{value:PP_ASK_G,text:"Type a group…"}));
       s.append(og2);
-      s.value=cur;
+      s.value=ppEffValue(d);
+      // The closed select truncates the text — the full state, and which KIND a binding is,
+      // has to be reachable without opening it.
+      const eff=s.value;
+      s.title=eff===PP_NEVER
+        ? "Never show — hidden everywhere (same as the eye toggle). Pick another option to bring it back."
+        : eff===PP_ALWAYS
+        ? "Always live — on air through Clear Slide (F2), Clear All (F1) and every slide change. Only its own eye, or having nothing to show, takes it down."
+        : cur
+        ? ((cur.slice(0,2)==="G:"?"Group: ":"Label: ")+cur.slice(2)+
+           "\nOn air only while ProPresenter's live slide carries it.")
+        : "Any slide — this element is not bound to a ProPresenter label or group.\nL· = slide label,  G· = group.";
     };
     paint();
     _ppSelRepaint.push(paint);
-    s.title="Only put this on air when ProPresenter's live slide carries this label / group";
+    s._ppPaint=paint;                 // refreshPpRows repaints the "on the live slide" group
     s.onclick=(e)=>e.stopPropagation();      // the row itself selects the element
     s.onchange=()=>{
       const v=s.value;
       if(v===PP_ASK_L||v===PP_ASK_G){
-        s.value=String(d.ppMatch||"");       // never leave the sentinel showing as the binding
+        s.value=ppEffValue(d);               // never leave the sentinel showing as the binding
         ppAskCustom(v===PP_ASK_G?"G":"L").then(nv=>{
-          if(nv){ d.ppMatch=nv; applyPreview(); }
+          if(nv){ d.ppMatch=nv; d.visible=true; d.clearImmune=false; applyPreview(); }
           renderPanels();                    // repaint either way — cancel must restore the row
         });
         return;
       }
-      d.ppMatch=v; applyPreview(); renderPanels();
+      if(v===PP_ALWAYS){ d.visible=true; d.clearImmune=true; d.ppMatch="";
+        // "Always live" and "only with another element" cannot both be true. Leave the link
+        // in place and the element still follows its target off air while the dropdown
+        // claims it is always up — so the link is what gives way.
+        if(d.vis==="linked"){ d.vis="auto"; delete d.visWith; }
+        applyPreview(); renderPanels(); return; }
+      if(v===PP_NEVER){ d.visible=false; applyPreview(); renderPanels(); return; }
+      // A binding (or "Any slide") is a statement about WHEN to show — so it also un-hides
+      // and drops the always-live immunity. Leaving either in place would make the pick a
+      // silent no-op: a hidden element stays hidden no matter what it is bound to.
+      d.visible=true; d.clearImmune=false; d.ppMatch=v; applyPreview(); renderPanels();
     };
     return s;
   }
@@ -3449,6 +3798,12 @@ if(!isOutput){
       const on=!!(d&&d.ppMatch)&&ppMatches(d.ppMatch,meta);
       row.classList.toggle("ppon",!!(d&&d.ppMatch)&&on);
       row.classList.toggle("ppoff",!!(d&&d.ppMatch)&&!on);
+      // Keep the "● On the live slide" quick-pick pointing at the slide that is actually up.
+      // NEVER while the operator has this select focused: rebuilding a select's options
+      // closes an open dropdown, and this runs on every slide change — i.e. repeatedly while
+      // ProPresenter is being clicked through, which is exactly when they would be using it.
+      const sel=row.querySelector(".ppbind");
+      if(sel && sel._ppPaint && document.activeElement!==sel){ try{ sel._ppPaint(); }catch(e){} }
     });
   }
   function moveEl(id,dir){ const a=preview.elements; const idx=a.findIndex(e=>e&&e.id===id); if(idx<0)return;
@@ -3461,14 +3816,55 @@ if(!isOutput){
     inp.oninput=()=>{ const v=parseFloat(inp.value); out.textContent=unit?v+unit:v; onCh(v); };
     return el("div",null,[el("label",{class:"fld",text:label}),el("div",{class:"row"},[inp,out])]);
   }
+  /* For a brand token the swatch must show the RESOLVED colour, or it reports something that
+     is not on air. The text field keeps the token itself, so the operator can still see (and
+     edit) that it is themed rather than a literal.
+
+     THREE THINGS THIS GETS RIGHT that the one-line version did not, all of which read from
+     the operator's chair as "adjusting one layer changed another":
+
+     1. RESOLVE AGAINST PREVIEW, NOT WHOEVER RENDERED LAST. tok() reads CUR_THEME, a module
+        global that each stage stamps at the top of its own renderAll(). In the console BOTH
+        monitors render, so at panel-build time CUR_THEME usually holds the PROGRAM theme.
+        Change the brand accent in Preview, don't Take yet, click a layer: the swatch showed
+        Program's old gold while the Preview monitor rendered the new blue — and one nudge of
+        the picker wrote Program's gold onto a Preview layer as a literal. That layer was then
+        pinned to the old brand colour forever while every other layer followed the new one.
+        The inspector only ever edits Preview, so resolve against Preview's theme explicitly.
+
+     2. SAY WHEN A COLOUR IS SHARED, AND ALLOW RE-LINKING. After "Apply theme to all elements"
+        every layer's colour is the string "@accent". Touching any picker silently rewrites
+        that ONE layer to a literal, so the next brand change moves every layer except the one
+        just touched — indistinguishable from "my per-layer edit leaked". rowSelect already
+        solves this honestly for fonts ("Brand theme (@display)"); colours now get the same
+        treatment: a badge naming the token, and typing a token back into the text field
+        RE-LINKS the layer. Re-linking was previously impossible — the input handler only
+        accepted hex, so "@accent" typed by hand never reached onCh at all.
+
+     3. KEEP THE ALPHA. <input type=color> is 6-digit RGB only. The reference list and event
+        list ship chipBg "#0b1220cc" — an 80%-opaque chip — and any touch of that picker wrote
+        back the 6-digit slice, so the chips jumped to fully solid on air with no control that
+        could put the transparency back. The stored alpha is preserved across picker edits. */
   function rowColor(label,val,onCh){
-    // For a brand token the swatch must show the RESOLVED colour, or it reports something
-    // that is not on air. The text field keeps the token itself, so the operator can still
-    // see (and edit) that it is themed rather than a literal.
-    const c=el("input",{type:"color",value:toHex(tok(val))}); const t=el("input",{type:"text",value:val});
-    c.oninput=()=>{t.value=c.value;onCh(c.value);};
-    t.oninput=()=>{ if(/^#?[0-9a-fA-F]{6,8}$/.test(t.value)){const v=t.value[0]==="#"?t.value:"#"+t.value;c.value=v.slice(0,7);onCh(v);} };
-    return el("div",null,[el("label",{class:"fld",text:label}),el("div",{class:"cw"},[c,t])]);
+    const th=()=>(preview&&preview.theme)||null;
+    const isTok=(v)=>typeof v==="string"&&v.charAt(0)==="@"&&THEME_COLOR_KEYS.indexOf(v.slice(1))>=0;
+    const alphaOf=(v)=>{ const s=String(v||""); return (s.charAt(0)==="#"&&s.length===9)?s.slice(7):""; };
+    let alpha=alphaOf(val);
+    const c=el("input",{type:"color",value:toHex(resolveTok(val,th()))});
+    const t=el("input",{type:"text",value:val});
+    const badge=el("span",{class:"ty"});
+    const paint=()=>{ const tk=isTok(t.value);
+      badge.textContent=tk?"brand":"";
+      badge.title=tk?("Follows the Brand theme ("+t.value+"). Using the picker unlinks THIS layer and pins a fixed colour; type the token back to re-link it.")
+                    :"A fixed colour on this layer only. Type @accent / @ink / @muted / @panel to follow the Brand theme instead."; };
+    paint();
+    c.oninput=()=>{ const v=c.value+alpha; t.value=v; paint(); onCh(v); };
+    t.oninput=()=>{
+      if(isTok(t.value)){ alpha=""; c.value=toHex(resolveTok(t.value,th())); paint(); onCh(t.value); return; }
+      if(/^#?[0-9a-fA-F]{6,8}$/.test(t.value)){ const v=t.value.charAt(0)==="#"?t.value:"#"+t.value;
+        alpha=alphaOf(v); c.value=toHex(v); paint(); onCh(v); }
+    };
+    return el("div",null,[el("label",{class:"fld",text:label}),el("div",{class:"cw"},[c,t,badge])]);
   }
   function rowText(label,val,onCh,ph){ const i=el("input",{type:"text",value:val||"",placeholder:ph||""});
     i.oninput=()=>onCh(i.value); return el("div",null,[el("label",{class:"fld",text:label}),i]); }
@@ -3496,6 +3892,170 @@ if(!isOutput){
   function group(title,nodes){ const g=el("div",{class:"grp"}); g.append(el("div",{class:"gh",text:title})); nodes.forEach(n=>n&&g.append(n)); return g; }
   function toHex(v){ v=v||"#000000"; return v[0]==="#"?v.slice(0,7):"#"+v.slice(0,6); }
   function escapeHtml(s){return (s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+
+  /* ================= COPY A LAYER'S LOOK ONTO OTHER LAYERS =====================
+     Designing four lower thirds that MATCH used to mean setting the same ~30 controls four
+     times over and getting one of them subtly wrong. This copies one layer's look onto the
+     layers the operator picks — per layer, not blind "apply to all", because with elements
+     bound to different ProPresenter labels the whole point is that some of them differ.
+
+     WHAT IT DELIBERATELY DOES NOT COPY: content, position/size, name, id, the ProPresenter
+     binding, the source, the dock and the stacking layer. Pasting geometry would stack every
+     element on top of every other one, and pasting a binding would put four elements on the
+     same slide — the two ways this feature could ruin a service instead of saving time.
+
+     TEXT STYLES ACROSS DIFFERENT TYPES. Each type keys its styles differently (scripture has
+     ref+body, name has name+title, bulletList has heading+item), so a key-by-key copy would
+     silently do nothing between two different types — the operator's most likely use. They
+     are mapped by ROLE instead: every type's styles are one "primary" (the big text that
+     carries the message) and at most one "secondary" (the smaller supporting line), so a
+     Scripture's verse-body typography lands on a Name's name, and its reference typography
+     on the role line. Same type = exact key-for-key copy, which is the identical result. */
+  const STYLE_ROLES={
+    scripture:{body:"primary", ref:"secondary"},
+    reference:{ref:"primary"},
+    sermonTitle:{title:"primary", sub:"secondary"},
+    logo:{title:"primary", sub:"secondary"},
+    name:{name:"primary", title:"secondary"},
+    text:{text:"primary"},
+    bulletList:{item:"primary", heading:"secondary"},
+    history:{item:"primary", heading:"secondary"},
+    eventList:{item:"primary", heading:"secondary"},
+    qr:{label:"primary"},
+    clock:{time:"primary", label:"secondary"}
+  };
+  // box keys that describe the PLATE, vs the ones that describe imported media. Split so the
+  // operator can take a background shape without dragging a 6 MB video onto four elements.
+  const BOX_SHAPE_KEYS=["style","shape","useGrad","fill1","fill2","gradAngle","opacity","radius",
+    "padX","padY","shadow","blur","border","borderColor","borderW","accent","accentColor",
+    "accentW","accentSide","align","valign","bevel","bevelDepth"];
+  const BOX_MEDIA_KEYS=["mediaSrc","mediaType","mediaLocal","mediaFit","mediaZoom","mediaX","mediaY",
+    "mediaOpacity","scrim","scrimColor"];
+  // What is on the clipboard, and which layers the operator has ticked. Both live out here
+  // rather than inside secInspector because renderPanels() rebuilds the whole inspector on
+  // every edit — state held inside it would be thrown away between the copy and the paste.
+  let styleClip=null;
+  let styleClipParts={shape:true,media:true,anim:true,loop:true,type:true};
+  let styleClipTargets=new Set();
+  function copyLookFrom(d){
+    styleClip={
+      fromId:d.id, fromType:d.type, fromName:(d.name||TYPE_LABELS[d.type]),
+      box:clone(d.box||{}), anim:clone(d.anim||{}), loop:clone(d.loop||{}),
+      style:clone(d.style||{}),
+      // chip chrome + list animation, for the two list types that have them
+      chipBg:d.chipBg, accentColor:d.accentColor, histAnim:d.histAnim, histDur:d.histDur
+    };
+    styleClipTargets=new Set();
+  }
+  // Roles present on the SOURCE, so a target key can ask for "the primary style" by name.
+  function stylesByRole(srcType,srcStyle){
+    const roles=STYLE_ROLES[srcType]||{}, out={};
+    Object.keys(roles).forEach(k=>{ if(srcStyle&&srcStyle[k]) out[roles[k]]=srcStyle[k]; });
+    return out;
+  }
+  function pasteLookOnto(d,clip,parts){
+    if(!d||!clip) return false;
+    let touched=false;
+    const cp=(keys,src,dst)=>keys.forEach(k=>{ if(src&&Object.prototype.hasOwnProperty.call(src,k)){ dst[k]=clone(src[k]); touched=true; } });
+    d.box=d.box||boxDefaults();
+    if(parts.shape) cp(BOX_SHAPE_KEYS,clip.box,d.box);
+    if(parts.media) cp(BOX_MEDIA_KEYS,clip.box,d.box);
+    if(parts.anim){ d.anim=clone(clip.anim||animDefaults()); touched=true;
+      if(clip.histAnim!==undefined && d.histAnim!==undefined){ d.histAnim=clip.histAnim; d.histDur=clip.histDur; } }
+    if(parts.loop){
+      d.loop=clone(clip.loop||loopDefaults()); touched=true;
+      // Ticker / credits-roll only render for MARQ_TYPES (setText hands off to renderMarquee
+      // only for those). Pasting one onto a QR code or a clock would leave that element
+      // carrying a motion it can never perform — the exact dead-option state the motion
+      // picker already refuses to offer. Land on "none" instead of lying.
+      if((d.loop.type==="ticker"||d.loop.type==="rollV") && MARQ_TYPES.indexOf(d.type)<0) d.loop.type="none";
+    }
+    if(parts.type){
+      const byRole=stylesByRole(clip.fromType,clip.style), tgtRoles=STYLE_ROLES[d.type]||{};
+      d.style=d.style||{};
+      Object.keys(tgtRoles).forEach(k=>{
+        const want=byRole[tgtRoles[k]];
+        if(want){ d.style[k]=clone(want); touched=true; }
+      });
+      // chip chrome only where the target actually has it (the two list types)
+      if(clip.chipBg!==undefined && d.chipBg!==undefined){ d.chipBg=clip.chipBg; touched=true; }
+      if(clip.accentColor!==undefined && d.accentColor!==undefined){ d.accentColor=clip.accentColor; touched=true; }
+    }
+    return touched;
+  }
+  function copyLookGroup(d){
+    const others=(preview.elements||[]).filter(e=>e&&e.id!==d.id);
+    const rows=[];
+    rows.push(el("div",{class:"row"},[
+      el("button",{class:"btn sm",style:"flex:1",text:"Copy this layer's look",
+        title:"Background, media, animation, motion and text styling — not its content, position or ProPresenter binding",
+        onclick:()=>{ copyLookFrom(d); renderPanels(); }})
+    ]));
+    if(!styleClip){
+      rows.push(el("p",{class:"hint",text:"Copy a look here, then select the layers to paste it onto. Content, position, size and the ProPresenter binding are never copied, so each layer keeps its own job."}));
+      return group("Match other layers",rows);
+    }
+    rows.push(el("p",{class:"hint",text:"Copied from “"+styleClip.fromName+"” ("+styleClip.fromType+")."}));
+    rows.push(el("div",{class:"gh",text:"What to paste"}));
+    const part=(k,label)=>rowToggle(label,styleClipParts[k],(v)=>{styleClipParts[k]=v;});
+    rows.push(part("shape","Background shape — fill, gradient, corners, border, accent, padding"));
+    rows.push(part("media","Background image / video"));
+    rows.push(part("anim","Animation (entrance / exit)"));
+    rows.push(part("loop","Motion / loop"));
+    rows.push(part("type","Text styles — font, size, weight, colour, spacing"));
+
+    rows.push(el("div",{class:"gh",text:"Paste onto which layers"}));
+    if(!others.length){
+      rows.push(el("p",{class:"hint",text:"There is only one layer in this look. Add another to paste onto."}));
+      return group("Match other layers",rows);
+    }
+    // Live count on the button, so the operator can see what a click is about to overwrite
+    // WITHOUT the panel rebuilding under them on every tick — renderPanels() here would
+    // collapse the section and lose the ticks they have already made.
+    const btn=el("button",{class:"btn primary full"});
+    const paintBtn=()=>{ const n=styleClipTargets.size;
+      btn.textContent=n?("Paste onto "+n+" layer"+(n===1?"":"s")):"Select layers above to paste onto";
+      btn.disabled=!n; btn.style.opacity=n?"":"0.55"; };
+    const list=el("div",{class:"ellist"});
+    others.forEach(o=>{
+      const cb=el("input",{type:"checkbox"}); cb.checked=styleClipTargets.has(o.id);
+      cb.onchange=()=>{ if(cb.checked)styleClipTargets.add(o.id); else styleClipTargets.delete(o.id); paintBtn(); };
+      const sameType=(o.type===styleClip.fromType);
+      list.append(el("label",{class:"sw",style:"display:flex;align-items:center;gap:8px;padding:5px 2px"},[
+        cb,el("span",{class:"tk"}),
+        el("span",{style:"flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
+          text:" "+(o.name||TYPE_LABELS[o.type])}),
+        // Say up front that a cross-type paste maps text styles by role rather than key —
+        // otherwise "it only half worked" looks like a bug instead of the documented rule.
+        el("span",{class:"ty",title:sameType?"Same type — an exact copy"
+          :"Different type — text styles are matched by role (main text → main text, secondary → secondary)",
+          text:sameType?o.type:o.type+" · by role"})
+      ]));
+    });
+    rows.push(list);
+    rows.push(el("div",{class:"row"},[
+      el("button",{class:"btn tiny",text:"All layers",onclick:()=>{ others.forEach(o=>styleClipTargets.add(o.id));
+        [...list.querySelectorAll("input[type=checkbox]")].forEach(c=>c.checked=true); paintBtn(); }}),
+      el("button",{class:"btn tiny",text:"None",onclick:()=>{ styleClipTargets.clear();
+        [...list.querySelectorAll("input[type=checkbox]")].forEach(c=>c.checked=false); paintBtn(); }})
+    ]));
+    // Confirmed, because it overwrites work and there is no undo anywhere in this app.
+    btn.onclick=()=>{
+      const ids=[...styleClipTargets], picked=(preview.elements||[]).filter(e=>e&&ids.indexOf(e.id)>=0);
+      if(!picked.length) return;
+      const what=Object.keys(styleClipParts).filter(k=>styleClipParts[k]);
+      if(!what.length){ flash(btn,"Tick at least one thing to paste"); return; }
+      if(!confirm("Paste the look from “"+styleClip.fromName+"” onto "+picked.length+" layer"+(picked.length===1?"":"s")+"?\n\n"+
+                  picked.map(e=>"  • "+(e.name||TYPE_LABELS[e.type])).join("\n")+
+                  "\n\nThis overwrites their styling and cannot be undone. Content, position and ProPresenter bindings are not touched.\nNothing reaches air until you press TAKE.")) return;
+      let n=0; picked.forEach(e=>{ if(pasteLookOnto(e,styleClip,styleClipParts)) n++; });
+      applyPreview(); renderPanels();
+      alert("Pasted onto "+n+" layer"+(n===1?"":"s")+".\n\nPress TAKE to send it live.");
+    };
+    paintBtn();
+    rows.push(el("div",{class:"row"},[btn]));
+    return group("Match other layers",rows);
+  }
 
   function typeGroup(title,styleObj,onCh){
     const fonts=[["'Oswald','Arial Narrow',sans-serif","Oswald (condensed)"],["'Bebas Neue',sans-serif","Bebas Neue"],
@@ -3601,50 +4161,152 @@ if(!isOutput){
     // MOTION (continuous loop)
     nodes.push(motionGroup(d,onCh));
 
+    // COPY THIS LAYER'S LOOK ONTO OTHERS — last, because it acts on everything above it.
+    nodes.push(copyLookGroup(d));
+
     return section("Element: "+(d.name||TYPE_LABELS[d.type]),nodes,true,"element");
   }
 
-  function importMedia(file,cb){
-    const isImg=/^image\//.test(file.type), isGif=/gif$/i.test(file.type), isVid=/^video\//.test(file.type);
-    if(isImg&&!isGif&&window.FileReader&&document.createElement("canvas").getContext){
+  /* Import a still or a video as a data URI.
+     cb(url,kind) on success; onErr(message) on a failure the operator has to know about —
+     BOTH FileReaders used to have no onerror at all, so a locked file or a disconnected
+     drive called nothing whatsoever: no alert, no console line, no repaint. The Import
+     button simply appeared not to work, which during a service is the worst possible way
+     to fail. (importGraphics, 40 lines down, has always had one — this is the same pattern.) */
+  function importMedia(file,cb,onErr){
+    onErr=onErr||function(){};
+    const type=String(file.type||"");
+    const isImg=/^image\//.test(type), isGif=/gif$/i.test(type), isVid=/^video\//.test(type);
+    // SVG is a VECTOR. Rasterising it through the canvas below is wrong twice over: a
+    // viewBox-only SVG has no intrinsic size, so img.width/height come back 0 and the canvas
+    // was clamped to 1x1 — the logo became a single pixel — and even when it does decode, a
+    // 1600px raster throws away the one property that makes an SVG worth using on a 1080p
+    // (or 4K) output. Ship the original: it scales perfectly and is almost always smaller.
+    const isSvg=/svg/i.test(type);
+    // Alpha survives PNG and dies in JPEG. The old test was PNG-only, so a transparent WebP,
+    // AVIF or SVG church logo was re-encoded to JPEG and composited onto a BLACK RECTANGLE —
+    // exactly the case the logo layer exists for (see the "usually a PNG that carries its own
+    // shape" note on the logo defaults). Only a JPEG source is safe to re-encode as JPEG.
+    const keepAlpha=!/^image\/jpe?g$/i.test(type);
+    if(isImg&&!isGif&&!isSvg&&window.FileReader&&document.createElement("canvas").getContext){
       const fr=new FileReader();
+      fr.onerror=()=>onErr("Couldn't read that file. If it is on a network or removable drive, copy it to this PC first.");
       fr.onload=()=>{ const img=new Image();
-        img.onload=()=>{ const max=1600; let w=img.width||0,h=img.height||0;
-          const sc=Math.min(1,max/Math.max(w,h||1)); const cw=Math.max(1,Math.round(w*sc)),ch=Math.max(1,Math.round(h*sc));
+        img.onload=()=>{ const max=1600; const w=img.naturalWidth||img.width||0, h=img.naturalHeight||img.height||0;
+          // No intrinsic size means there is nothing to scale INTO. Clamping to 1x1 (what
+          // Math.max(1,Math.round(0)) did) silently produced a one-pixel image that renders
+          // as an empty box on air. Hand back the original file instead.
+          if(!w||!h){ cb(fr.result,"image"); return; }
+          const sc=Math.min(1,max/Math.max(w,h));
+          const cw=Math.max(1,Math.round(w*sc)),ch=Math.max(1,Math.round(h*sc));
           const cv=document.createElement("canvas"); cv.width=cw; cv.height=ch; const ctx=cv.getContext("2d");
           if(!ctx){ cb(fr.result,"image"); return; }
           ctx.drawImage(img,0,0,cw,ch);
-          const png=/png$/i.test(file.type)||/^image\/png/.test(file.type);
-          try{ cb(cv.toDataURL(png?"image/png":"image/jpeg",0.85),"image"); }catch(e){ cb(fr.result,"image"); } };
+          try{
+            const out=cv.toDataURL(keepAlpha?"image/png":"image/jpeg",0.85);
+            // A photographic still re-encoded as PNG can come out BIGGER than the original
+            // (PNG is lossless). Keep whichever is smaller — the whole point of this pass is
+            // to fit inside the relay's 5 MB config budget.
+            cb((out&&out.length<String(fr.result||"").length)?out:fr.result,"image");
+          }catch(e){ cb(fr.result,"image"); } };
         img.onerror=()=>cb(fr.result,"image"); img.src=fr.result; };
       fr.readAsDataURL(file);
-    } else { const fr=new FileReader(); fr.onload=()=>cb(fr.result,isVid?"video":"image"); fr.readAsDataURL(file); }
+    } else {
+      const fr=new FileReader();
+      fr.onerror=()=>onErr("Couldn't read that file. If it is on a network or removable drive, copy it to this PC first.");
+      fr.onload=()=>cb(fr.result,isVid?"video":"image");
+      fr.readAsDataURL(file);
+    }
   }
+  /* How many bytes of media this look can still carry.
+     relay.js refuses a config over 5,000,000 bytes (relay.js:164) — that is the hard ceiling
+     on everything a Take sends, media included. The import guard used to check the RAW FILE
+     against 8 MB for video, but base64 costs 4/3, so an 8 MB mp4 became an ~11 MB data URI:
+     it passed the check, then every Take answered 413 and NOTHING reached OBS for the rest
+     of the service. The console did say so — but only at Take, i.e. live. Worse, the first
+     save threw QuotaExceeded and reported "local storage is full", which names the wrong
+     culprit entirely. Measure what is actually left, against the actual config, before
+     committing the import. */
+  const RELAY_MAX=5e6;
+  function mediaBudget(box){
+    // Size the look WITHOUT this element's current media, so replacing a 3 MB video with
+    // another 3 MB video is judged on the space it will actually occupy, not double.
+    const keep=box?box.mediaSrc:"";
+    if(box) box.mediaSrc="";
+    let used=0; try{ used=JSON.stringify(preview).length; }catch(e){ used=0; }
+    if(box) box.mediaSrc=keep;
+    // 64 KB of headroom for the JSON envelope, the _take stamp and the conn block.
+    return Math.max(0,RELAY_MAX-used-65536);
+  }
+  const mb=(n)=>(n/1048576).toFixed(1)+" MB";
+  /* OBS-style LOCAL FILE media. A path like C:\Videos\loop.mp4 cannot go into the <video>
+     src directly — the output page is http-served, and an http page may not load file://
+     subresources (Chromium refuses; the same reason OBS's browser source can't either). The
+     relay therefore serves the file itself at /media?src=<path>, and mediaSrc holds that
+     RELATIVE URL: both monitors, the OBS output and the SDI offscreen window are all served
+     from the relay's own origin, so a relative URL is correct everywhere without baking in a
+     hostname. The typed path itself lives in b.mediaLocal so the field can re-display it.
+     Why anyone would want this over Import: the import path embeds base64 into a config
+     capped at 5 MB — a real worship loop can NEVER fit. A linked local file costs the
+     config ~100 bytes regardless of size. */
+  function isLocalPath(v){
+    const s=String(v||"").trim();
+    return /^file:\/\//i.test(s) || /^[a-zA-Z]:[\\\/]/.test(s) || /^\\\\/.test(s);
+  }
+  function localMediaUrl(p){ return "/media?src="+encodeURIComponent(String(p||"").trim()); }
+  // "Copy as path" on Windows wraps the path in quotes — strip them, or the relay stats a
+  // file whose name literally starts with a quote and 404s on a path that looks perfect.
+  function normLocalPath(v){ return String(v||"").trim().replace(/^"(.*)"$/,"$1").trim(); }
   function mediaGroup(b,onCh){
-    const hasM=!!b.mediaSrc, isUrl=hasM&&/^https?:/i.test(b.mediaSrc);
+    const hasM=!!b.mediaSrc, isLocal=hasM&&/^\/media\?/.test(b.mediaSrc),
+          isUrl=hasM&&/^https?:/i.test(b.mediaSrc);
     const fileInput=el("input",{type:"file",accept:"image/*,video/*",style:"display:none"});
     fileInput.onchange=()=>{ const f=fileInput.files&&fileInput.files[0]; if(!f)return;
-      // Guard EVERY media type, not just video. Media is inlined as a base64 data
-      // URI into the config, and that config is stored three times over in
-      // localStorage and POSTed to the relay (5 MB cap). An unguarded large image
-      // silently blew the quota, so saves stopped persisting and Take never
-      // reached OBS while the console still said ON AIR.
-      // GIFs skip the canvas downscaler (it would kill the animation), so they go
-      // in at full size and get the same limit as video.
+      // Guard EVERY media type, not just video. Media is inlined as a base64 data URI into
+      // the config, and that config is stored three times over in localStorage and POSTed to
+      // the relay (5 MB cap). An unguarded large image silently blew the quota, so saves
+      // stopped persisting and Take never reached OBS while the console still said ON AIR.
+      //
+      // TWO checks, because one is not enough. The cheap pre-check rejects the obviously
+      // hopeless before spending time reading and re-encoding; the real check is on the
+      // ENCODED result against what THIS look can still carry. The old code had only a raw
+      // 8 MB / 12 MB pre-check, which is ABOVE what can ever reach air: base64 costs 4/3, so
+      // an 8 MB mp4 became an ~11 MB data URI that passed the guard and then failed every
+      // Take with a 413 for the rest of the service. GIFs skip the canvas downscaler (it
+      // would kill the animation), so they arrive at full size and get the video treatment.
       const isVideo=/^video\//.test(f.type), isGif=/gif$/i.test(f.type);
-      const cap=(isVideo||isGif)?8:12;                 // MB — stills are downscaled to 1600px first
-      if(f.size>cap*1024*1024){
-        alert("That "+(isVideo?"video":isGif?"GIF":"image")+" is "+(f.size/1048576).toFixed(1)+" MB.\n\n"+
-              "Media is embedded in the show file, so anything this large can exceed local storage "+
-              "and stop the output updating.\n\nHost it (a direct link, or a local web server) and "+
-              "paste the URL in the “…or paste media URL” field below.");
-        fileInput.value=""; return;
+      const what=isVideo?"video":isGif?"GIF":"image";
+      const budget=mediaBudget(b);
+      const tooBig=(bytes,note)=>{
+        alert("That "+what+" is "+mb(bytes)+" once embedded, and this look has "+mb(budget)+" of room left.\n\n"+
+              note+"\n\nUse “…or a local file on this PC” below instead — a linked local file has no size "+
+              "limit and costs this look nothing. (A hosted web URL works the same way.)");
+        fileInput.value="";
+      };
+      // Stills are downscaled to 1600px first, so judge them on a generous raw allowance and
+      // let the encoded check below be the real gate. Video and GIF are embedded as-is.
+      const rawGuess=(isVideo||isGif)?Math.ceil(f.size*4/3):f.size;
+      if((isVideo||isGif) && rawGuess>budget){
+        tooBig(rawGuess,"Everything on the Take — every layer, every image, every video — has to fit in one 5 MB "+
+                        "message to the output, and this alone is over what is left.");
+        return;
       }
-      importMedia(f,(url,kind)=>{ b.mediaSrc=url; b.mediaType=kind; onCh(); renderPanels(); }); };
+      if(f.size>24*1024*1024){   // nothing this large survives the downscaler either
+        tooBig(f.size,"That is larger than this app will read at all.");
+        return;
+      }
+      importMedia(f,(url,kind)=>{
+        // THE check: the encoded length, against what is actually left. Committing first and
+        // discovering the overflow at Take is how this failed before.
+        if(String(url||"").length>budget){ tooBig(String(url||"").length,
+          "Everything on the Take — every layer, every image, every video — has to fit in one 5 MB "+
+          "message to the output."); return; }
+        b.mediaSrc=url; b.mediaType=kind; b.mediaLocal=""; onCh(); renderPanels();
+      },(msg)=>{ alert(msg); fileInput.value=""; }); };
     const rows=[
       el("div",{class:"row"},[
         el("button",{class:"btn sm",style:"flex:1",text:hasM?"Replace image / video\u2026":"Import image / video\u2026",onclick:()=>fileInput.click()}),
-        hasM?el("button",{class:"btn sm danger",text:"Remove",onclick:()=>{b.mediaSrc="";b.mediaType="";onCh();renderPanels();}}):null
+        hasM?el("button",{class:"btn sm danger",text:"Remove",onclick:()=>{b.mediaSrc="";b.mediaType="";b.mediaLocal="";onCh();renderPanels();}}):null
       ]),
       fileInput,
       // rowText binds oninput, so calling renderPanels() from the handler destroyed the
@@ -3654,16 +4316,51 @@ if(!isOutput){
       // change event, i.e. blur or Enter \u2014 which is when the dependent controls (Fit,
       // Zoom, scrim) need to appear.
       (function(){
-        const row=rowText("\u2026or paste media URL",isUrl?b.mediaSrc:"",
-          (v)=>{const u=v.trim();b.mediaSrc=u;b.mediaType=/\.(mp4|webm|ogv|mov)(\?|$)/i.test(u)?"video":"image";onCh();},
+        const row=rowText("\u2026or paste a web URL",isUrl?b.mediaSrc:"",
+          // "" (auto), not a hard guess. Writing "image" here for anything without a video
+          // extension is what made an extension-less or query-suffixed video URL render into
+          // an <img> that shows nothing \u2014 and because it wrote mediaType, the operator could
+          // not override it either. Leave it to isVideoSrc(), and expose the override below.
+          //
+          // A LOCAL path pasted in here ("C:\\u2026", "\\server\\u2026", "file:///\u2026") is routed to the
+          // local-file mechanism instead of being handed to the renderer raw \u2014 an http page
+          // cannot load file:// subresources, so the raw path would just silently show
+          // nothing, in the field that looks like exactly the right place to paste it.
+          (v)=>{const u=v.trim();
+            if(isLocalPath(u)){ const pth=normLocalPath(u); b.mediaLocal=pth; b.mediaSrc=localMediaUrl(pth); b.mediaType=""; onCh(); return; }
+            b.mediaSrc=u; b.mediaLocal=""; b.mediaType=""; onCh();},
           "https://\u2026  image or mp4");
         const inp=row&&row.querySelector&&row.querySelector("input");
         if(inp) inp.addEventListener("change",()=>renderPanels());
         return row;
-      })()
+      })(),
+      // \u2026or an OBS-style LOCAL FILE, linked rather than embedded. See the block comment on
+      // isLocalPath above for why this goes through the relay instead of a file:// src.
+      (function(){
+        const row=rowText("\u2026or a local file on this PC",b.mediaLocal||"",
+          (v)=>{const pth=normLocalPath(v);
+            if(!pth){ // cleared: only drop mediaSrc if it was ours, not an unrelated URL/import
+              b.mediaLocal=""; if(isLocal){ b.mediaSrc=""; b.mediaType=""; } onCh(); return; }
+            b.mediaLocal=pth; b.mediaSrc=localMediaUrl(pth); b.mediaType=""; onCh();},
+          "C:\\Videos\\loop.mp4   or  file:///\u2026");
+        const inp=row&&row.querySelector&&row.querySelector("input");
+        if(inp) inp.addEventListener("change",()=>renderPanels());
+        return row;
+      })(),
+      isLocal?el("p",{class:"hint",text:"Linked, not embedded \u2014 no size limit, so this is the way to run a big worship loop. "+
+        "The file is read live from this PC by the desktop app / relay, so it must stay at this path, and a look "+
+        "exported to another computer will need the same file there. Plays in OBS via the normal output URL."}):null
     ];
     if(hasM){
-      rows.push(rowSelect("Fit",b.mediaFit,[["cover","Fill & crop (cover)"],["contain","Fit inside (contain)"],["stretch","Stretch to fill"],["center","Center (no scale)"],["tile","Tile / repeat"]],(v)=>{b.mediaFit=v;onCh();}));
+      // The override for a URL the extension sniff cannot read — "…/bug", "…/play?id=7", a
+      // CDN path with no suffix. Auto is right almost always; when it is not, this is the
+      // only thing that can put a video on air at all.
+      rows.push(rowSeg("Treat as",b.mediaType||"",[["","Auto"],["image","Image"],["video","Video"]],(v)=>{b.mediaType=v;onCh();renderPanels();}));
+      if(!b.mediaType && /^https?:/i.test(b.mediaSrc||"") && !isVideoSrc(b.mediaSrc,""))
+        rows.push(el("p",{class:"hint",text:"Reading this URL as an IMAGE (no video extension found). If it is a video, set “Treat as” to Video — otherwise it will show nothing."}));
+      if(b.mediaFit==="tile" && isVideoSrc(b.mediaSrc,b.mediaType))
+        rows.push(el("p",{class:"hint",text:"Tile / repeat cannot tile a video — this one renders as Fit inside instead. Use an image to tile."}));
+      rows.push(rowSelect("Fit",b.mediaFit,[["cover","Fill & crop (cover)"],["contain","Fit inside (contain)"],["stretch","Stretch to fill"],["center","Center (no scale)"],["tile","Tile / repeat"]],(v)=>{b.mediaFit=v;onCh();renderPanels();}));
       rows.push(split(rowRange("Zoom / crop",b.mediaZoom,1,3,0.05,"x",(v)=>{b.mediaZoom=v;onCh();}),
                       rowRange("Media opacity",b.mediaOpacity,0,1,0.02,"",(v)=>{b.mediaOpacity=v;onCh();})));
       rows.push(split(rowRange("Focal X",b.mediaX,0,100,1,"%",(v)=>{b.mediaX=v;onCh();}),
@@ -3689,26 +4386,62 @@ if(!isOutput){
     if((d.vis||"auto")==="always")
       rows.push(el("p",{class:"hint",text:"Stays on screen through scripture changes \u2014 won't re-animate. Perfect for a logo or watermark."}));
 
+    // The clear escape hatch. Deliberately its own row rather than a fourth "When to show"
+    // mode: it is orthogonal to the three above (a linked element can be clear-immune too),
+    // and folding it in would have made "Always on (persistent)" quietly mean two things.
+    rows.push(rowToggle("Stay on air through ProPresenter clears (F1 / F2)",!!d.clearImmune,(v)=>{d.clearImmune=v;onCh();renderPanels();}));
+    rows.push(el("p",{class:"hint",text:d.clearImmune
+      ? "This element ignores Clear Slide and Clear All \u2014 nothing in ProPresenter can take it down, only its own eye toggle here. Use it for a countdown or a permanent watermark."
+      : "Clear All (F1) takes everything off air. Clear Slide (F2) takes everything off except the running lists \u2014 the scripture reference list and the event list \u2014 which keep their title and their entries. Everything returns on the next live slide."}));
+
     // The same binding as the dropdown in the Layers list, spelled out. Both write d.ppMatch
     // and both call renderPanels(), so they cannot drift apart.
     rows.push(el("div",{class:"gh",text:"ProPresenter slide label / group"}));
     {
+      // Same kinds, same order, same naming as the Layers-row select (ppBindSelect) — the
+      // two write the same field, so if they describe it differently the operator learns
+      // two vocabularies for one setting. This one has room to spell the kind out in full.
+      const _m=(typeof pgStage.slideMeta==="function")?pgStage.slideMeta():{group:"",label:""};
+      const _lL=String(_m.label||"").trim(), _lG=String(_m.group||"").trim();
       const bindOpts=[["","Any slide (no binding)"]]
-        .concat(ppLib.labels.map(v=>["L:"+v,"Label: "+v]))
-        .concat(ppLib.groups.map(v=>["G:"+v,"Group: "+v]));
+        .concat(_lL?[["L:"+_lL,"● Live slide's label:  "+_lL]]:[])
+        .concat(_lG?[["G:"+_lG,"● Live slide's group:  "+_lG]]:[])
+        .concat(ppLib.labels.map(v=>["L:"+v,"Label:  "+v]))
+        .concat(ppLib.groups.map(v=>["G:"+v,"Group:  "+v]));
       const cur=String(d.ppMatch||"");
       // Same reason as the Layers select: never let an unknown binding be silently
       // reported as "Any slide".
       if(cur && !bindOpts.some(o=>o[0]===cur)) bindOpts.push([cur,(cur.slice(0,2)==="G:"?"Group: ":"Label: ")+cur.slice(2)+"  (not in the current deck)"]);
       bindOpts.push([PP_ASK_L,"Type a label\u2026"]);
       bindOpts.push([PP_ASK_G,"Type a group\u2026"]);
-      rows.push(rowSelect("Only on air when the live slide is",cur,bindOpts,(v)=>{
+      const bindRow=rowSelect("Only on air when the live slide is",cur,bindOpts,(v)=>{
         if(v===PP_ASK_L||v===PP_ASK_G){
           ppAskCustom(v===PP_ASK_G?"G":"L").then(nv=>{ if(nv){ d.ppMatch=nv; onCh(); } renderPanels(); });
           return;
         }
         d.ppMatch=v; onCh(); renderPanels();
-      }));
+      });
+      rows.push(bindRow);
+      // New labels arrive whenever ProPresenter opens a deck. The Layers-row selects repaint
+      // themselves through _ppSelRepaint; this one used to be left out, so the two dropdowns
+      // — which write THE SAME FIELD — could disagree about which labels exist until some
+      // unrelated edit rebuilt the panel.
+      {
+        const sel=bindRow.querySelector&&bindRow.querySelector("select");
+        if(sel) _ppSelRepaint.push(()=>{ if(document.activeElement===sel) return;
+          const keep=String(d.ppMatch||""); sel.textContent="";
+          const m2=(typeof pgStage.slideMeta==="function")?pgStage.slideMeta():{group:"",label:""};
+          const lL=String(m2.label||"").trim(), lG=String(m2.group||"").trim();
+          const os=[["","Any slide (no binding)"]]
+            .concat(lL?[["L:"+lL,"● Live slide's label:  "+lL]]:[])
+            .concat(lG?[["G:"+lG,"● Live slide's group:  "+lG]]:[])
+            .concat(ppLib.labels.map(v=>["L:"+v,"Label:  "+v]))
+            .concat(ppLib.groups.map(v=>["G:"+v,"Group:  "+v]));
+          if(keep && !os.some(o=>o[0]===keep)) os.push([keep,(keep.slice(0,2)==="G:"?"Group: ":"Label: ")+keep.slice(2)+"  (not in the current deck)"]);
+          os.push([PP_ASK_L,"Type a label…"],[PP_ASK_G,"Type a group…"]);
+          os.forEach(o=>sel.append(el("option",{value:o[0],text:o[1]})));
+          sel.value=keep; });
+      }
       rows.push(el("p",{class:"hint",text:ppLib.labels.length||ppLib.groups.length
         ? "Bind an element to a ProPresenter group or slide label and that verse lands in this element's position. GROUPS are the reliable route \u2014 ProPresenter publishes its whole Groups library, so a custom group appears here as soon as you connect. Slide labels are only offered once the app has seen a deck carrying them; type one in if it is missing. The builder preview always shows the element so you can still place it \u2014 the Program monitor and OBS obey the binding."
         : "Connect to ProPresenter (Connection panel) and its Groups library plus the labels on any deck you have open appear here automatically \u2014 there is nothing to retype."}));

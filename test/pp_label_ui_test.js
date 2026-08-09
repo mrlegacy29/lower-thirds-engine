@@ -292,6 +292,59 @@ const pvText = () => { const root = D.getElementById('pv-scaler'); if (!root) re
        !rowFor('Ghost').classList.contains('ppon') && !rowFor('Ghost').classList.contains('ppoff'));
   }
 
+  /* ---- "Always live / on" and "Never show" ----
+     The same dropdown answers the whole question "when does this layer show?". These two are
+     STATES, not bindings — they write the fields that already exist (visible / clearImmune /
+     ppMatch) so the eye toggle and this select can never disagree, and so Always-live rides
+     on the clear-immunity that clear_screen_test already proves survives a real F1. */
+  {
+    const savedEl = () => { let c = null; try { c = JSON.parse(W.localStorage.getItem('pplt.preview.v2')); } catch (e) {}
+      return c && c.elements.find(e => e && e.name === 'Ghost'); };
+    const g = bindOf('Ghost');
+    ok('the dropdown offers Always live and Never show',
+       optVals(g).some(v => /alwaysLive/.test(v)) && optVals(g).some(v => /neverShow/.test(v)));
+    ok('"Any slide" is STILL the first option (the default stays on top)', optVals(g)[0] === '');
+
+    // NEVER SHOW = the eye's field, through the dropdown.
+    g.value = optVals(g).find(v => /neverShow/.test(v));
+    g.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(250);
+    ok('Never show hides the element', savedEl().visible === false);
+    ok('...and the dropdown keeps displaying it', /neverShow/.test(bindOf('Ghost').value));
+    await take();
+    ok('...and it leaves the Program monitor', !/GHOST/.test(pgText()));
+
+    // ALWAYS LIVE = visible + clear-immune + unbound.
+    const g2 = bindOf('Ghost');
+    g2.value = optVals(g2).find(v => /alwaysLive/.test(v));
+    g2.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(250);
+    {
+      const e = savedEl();
+      ok('Always live un-hides the element', e.visible === true);
+      ok('...arms clear-immunity (the field clear_screen_test proves rides through F1)', e.clearImmune === true);
+      ok('...and drops any binding, so nothing gates it', (e.ppMatch || '') === '');
+    }
+    ok('...and the dropdown displays it', /alwaysLive/.test(bindOf('Ghost').value));
+    await take();
+    ok('...and it is back on the Program monitor', /GHOST/.test(pgText()));
+
+    // Picking a binding afterwards must MEAN something: visible again, immunity dropped.
+    const g3 = bindOf('Ghost');
+    g3.value = 'L:Top Lower 3rds'; g3.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(250);
+    {
+      const e = savedEl();
+      ok('picking a label afterwards drops the immunity', e.clearImmune === false);
+      ok('...and keeps the element visible', e.visible === true);
+      ok('...and binds it', e.ppMatch === 'L:Top Lower 3rds');
+    }
+    // and back to Any slide, leaving the element as this suite's later readers expect
+    const g4 = bindOf('Ghost');
+    g4.value = ''; g4.dispatchEvent(new W.Event('change', { bubbles: true }));
+    await sleep(200);
+  }
+
   ok('none of it raised a console error', errors.length === 0);
   console.log('\nPP-LABEL-UI RESULT  pass=' + pass + '  fail=' + fail +
               '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 4)) : 'NONE'));

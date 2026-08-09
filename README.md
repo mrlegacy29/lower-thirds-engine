@@ -26,11 +26,15 @@ in-app relay and GitHub-Releases auto-update.
    (and OBS). The Take button reads **ON AIR** (green) when Program matches
    Preview, **TAKE TO AIR** (red) when you have changes to push.
 
-**F2 (Clear Slide)** takes the verse off air and leaves the Scripture reference
-list up, entries and all — that's the state you sit in between sermon points.
-**F1 (Clear All)** ends the session: the list empties and its heading goes with
-it. ProPresenter can only tell the two apart when something besides the slide is
-on screen (a background counts), so pick the detection rule under **Connection →
+**F2 (Clear Slide)** takes **everything** off air except the running lists — the
+Scripture reference list and the Event list keep their title and their entries.
+That's the state you sit in between sermon points. **F1 (Clear All)** ends the
+session: everything goes, lists, logo and all. Both are transient — the next
+live slide brings every element back with nothing to re-arm. If one element
+should ride through clears (a countdown, a watermark), tick **Stay on air
+through ProPresenter clears** in its *Display & layering* panel. ProPresenter
+can only tell the two clears apart when something besides the slide is on
+screen (a background counts), so pick the detection rule under **Connection →
 Clear behavior** and watch the live layer readout while you test.
 
 ### Routing by ProPresenter group (or slide label)
@@ -56,18 +60,59 @@ bottom of the list and type it; matching ignores case and stray spaces.
 Bound elements stay visible in the **Preview** so you can still position them;
 the **Program** monitor and OBS obey the binding.
 
+In the dropdown, **L·** marks a slide label and **G·** marks a group — the two
+can share a name and route differently, so the kind is always in the text. The
+**● On the live slide** entries at the top bind to whatever ProPresenter has up
+right now, without you having to remember how the slide was filed.
+
+The same dropdown also answers the rest of "when does this layer show?":
+**● Always live / on** keeps the layer up through Clear Slide, Clear All and
+every slide change — perfect for the logo — and **○ Never show** hides it (same
+as the eye). Picking a label or *Any slide* afterwards brings it back to normal
+routing.
+
+### Background image / video — three ways in
+
+Every element's *Background image / video* panel takes media three ways, same
+idea as OBS's media sources:
+
+- **Import** embeds the file into the show file itself. Portable — an exported
+  look carries it to another PC — but everything on a Take has to fit one 5 MB
+  message, so this is for logos and stills, not loops.
+- **Web URL** links to hosted media. Costs the look nothing.
+- **Local file** links to a file on this PC — `C:\Videos\loop.mp4` or a
+  `file:///…` URL (pasting either into the URL field works too). No size limit,
+  so this is the way to run a big worship loop. The desktop app / relay serves
+  the file to OBS, so it must be running and the file must stay at that path;
+  a look exported to another computer needs the same file there.
+
+### Matching layers to each other
+
+Styling four positions to look identical used to mean setting the same ~30
+controls four times. Open the source layer, hit **Copy this layer's look**
+(bottom of the inspector), tick the layers that should receive it — per layer,
+with an *All layers* shortcut — and paste. Background, media, animation, motion
+and text styling transfer; content, position, size and ProPresenter bindings
+never do, so each layer keeps its own job. Between different element types the
+text styles map by role (main text → main text, secondary line → secondary
+line). The paste is confirmed first, and nothing reaches air until you press
+**Take**.
+
 ### Logo / slogan layer
 
 Add a **Logo / Slogan** layer for a church logo, ministry name or strapline. It
-rides above the lower thirds and is deliberately outside ProPresenter's reach —
-**F1 / Clear All will not take it down.** It carries text, a slogan line, and an
-image or MP4 (drop a PNG in *Background image / video* and leave the text blank
-for a plain logo bug).
+rides above the lower thirds and carries text, a slogan line, and an image or
+MP4 (drop a PNG in *Background image / video* and leave the text blank for a
+plain logo bug).
 
-Because nothing in ProPresenter can clear it, the only thing that does is the
-**Logo / Slogan** row under the monitors. Those buttons go straight to air on
-click — no Take needed — and read **● ON AIR** or **○ off** so there is never any
-doubt about what is up.
+Like everything else, **F1 / Clear All takes it down** — and the next live slide
+brings it straight back, still armed. The **Logo / Slogan** row under the
+monitors is the manual control: clicks go straight to air with no Take, and the
+button reads **● ON AIR**, **◐ cleared by F1/F2** (armed, but a clear is holding
+it off), or **○ off**. Clicking it on while the screen is cleared forces the
+logo up anyway — for the post-service ident — and the next live slide hands
+control back to ProPresenter. Tick **Stay on air through ProPresenter clears**
+on the element if it should ignore F1/F2 entirely.
 
 When a new version is published, the app shows **"Update available → downloading
 → Restart & Install."**

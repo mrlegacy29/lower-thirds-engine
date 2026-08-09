@@ -292,6 +292,84 @@ function createServer(htmlFile) {
       if (!u.query.target) { res.writeHead(400); return res.end("missing target"); }
       return proxyPP(u.query.target, res, req);
     }
+    /* ----- local media, OBS-style ------------------------------------------------
+       Serves a local media file to the output/console pages, so a look can point at
+       C:\Videos\loop.mp4 instead of embedding it. Embedding pays base64 x 4/3 into a
+       config capped at 5 MB three lines up — a 4 K worship loop can never fit — while
+       a served file costs the config ~100 bytes. This is the same trick OBS itself
+       uses ("Local file" on a media source): the page is http-served, and an http page
+       may not load file:// subresources, so the server hands the file over http.
+
+       Guard rails, in order of what they protect:
+       - proxyAllowed(): a hostile web page open on the stream PC could otherwise probe
+         local files through <img>/<video> tags (CORS blocks READING the bytes, but not
+         load/error timing). Sec-Fetch-Site refuses cross-site browser loads outright,
+         while OBS, Electron, curl and the same-origin pages all pass.
+       - extension allowlist: this must never become a generic local-file reader — a
+         .txt/.key/.js path answers 403 no matter what it is named in the query.
+       - SVG gets a no-script CSP: an <img> never runs SVG script, but a DIRECT
+         navigation to /media would execute it on the relay's own origin, right next to
+         the console's localStorage.
+       The relay listens on 127.0.0.1 only (see start()), so none of this is reachable
+       from the LAN at all. */
+    if (p === "/media" && req.method === "GET") {
+      if (!proxyAllowed(req)) return deny(res, "cross-origin use of local media");
+      let fp = String(u.query.src || "");
+      if (!fp) { res.writeHead(400); return res.end("missing src"); }
+      // Accept a file:// URL as well as a plain path — both spellings are offered in
+      // the console UI, and "Copy as path"/drag-and-drop produce either.
+      if (/^file:\/\//i.test(fp)) {
+        try { fp = url.fileURLToPath(fp); } catch (e) { res.writeHead(400); return res.end("bad file url"); }
+      }
+      const MEDIA_TYPES = {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+        ".webp": "image/webp", ".avif": "image/avif", ".bmp": "image/bmp", ".svg": "image/svg+xml",
+        ".mp4": "video/mp4", ".m4v": "video/x-m4v", ".webm": "video/webm",
+        ".ogv": "video/ogg", ".ogg": "video/ogg", ".mov": "video/quicktime",
+      };
+      const type = MEDIA_TYPES[path.extname(fp).toLowerCase()];
+      if (!type) return deny(res, "not a media file");
+      fs.stat(fp, (err, st) => {
+        if (err || !st.isFile()) {
+          cors(res, req);
+          res.writeHead(404, { "Content-Type": "application/json" });
+          return res.end(JSON.stringify({ error: "no such media file", path: fp }));
+        }
+        const headers = {
+          "Content-Type": type,
+          "X-Content-Type-Options": "nosniff",
+          "Accept-Ranges": "bytes",
+          // The operator's loop.mp4 gets re-exported over the top of itself; a cached
+          // stale copy on air is exactly the kind of failure nobody can diagnose live.
+          "Cache-Control": "no-cache",
+        };
+        if (type === "image/svg+xml") headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'";
+        cors(res, req);
+        // Single-range support: Chromium requests ranges for <video>, and without 206s
+        // seeking stalls and a loop can hang at the wrap point.
+        const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ""));
+        if (m && (m[1] !== "" || m[2] !== "")) {
+          let start = m[1] === "" ? Math.max(0, st.size - parseInt(m[2], 10)) : parseInt(m[1], 10);
+          let end = (m[1] !== "" && m[2] !== "") ? Math.min(parseInt(m[2], 10), st.size - 1) : st.size - 1;
+          if (isNaN(start) || isNaN(end) || start > end || start >= st.size) {
+            res.writeHead(416, { "Content-Range": "bytes */" + st.size });
+            return res.end();
+          }
+          headers["Content-Range"] = "bytes " + start + "-" + end + "/" + st.size;
+          headers["Content-Length"] = end - start + 1;
+          res.writeHead(206, headers);
+          const rs = fs.createReadStream(fp, { start, end });
+          rs.on("error", () => { try { res.destroy(); } catch (e) {} });
+          return rs.pipe(res);
+        }
+        headers["Content-Length"] = st.size;
+        res.writeHead(200, headers);
+        const rs = fs.createReadStream(fp);
+        rs.on("error", () => { try { res.destroy(); } catch (e) {} });
+        rs.pipe(res);
+      });
+      return;
+    }
     res.writeHead(404); res.end("not found");
   });
 }
