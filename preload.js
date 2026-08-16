@@ -17,6 +17,15 @@ contextBridge.exposeInMainWorld("ltDesktop", {
   installUpdate: () => ipcRenderer.send("updater:install"),
   onUpdate: (cb) => ipcRenderer.on("updater:status", (_e, s) => { try { cb(s); } catch (e) {} }),
 
+  // A key of the operator's own for clearing the scripture reference list. GLOBAL, because
+  // the operator is looking at ProPresenter when they press it — see main.js for why
+  // ProPresenter's own API cannot be used to tell Clear All from Clear Slide.
+  clearKey: {
+    set: (accel) => ipcRenderer.invoke("clearkey:set", accel),
+    get: () => ipcRenderer.invoke("clearkey:get"),
+    onFire: (cb) => ipcRenderer.on("lt:clear-list", () => { try { cb(); } catch (e) {} }),
+  },
+
   // DeckLink fill + key. Present only in the desktop app — lt.html feature-detects
   // this, so the same file still runs in a plain browser and in OBS.
   sdi: {

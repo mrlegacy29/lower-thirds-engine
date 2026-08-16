@@ -8,7 +8,7 @@
      renderer (preload injects the "Update available" banner).
    ========================================================================== */
 
-const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, globalShortcut } = require("electron");
 const path = require("path");
 const relay = require("./relay");
 // DeckLink fill+key output. Self-contained and fail-soft: if the optional native
@@ -187,6 +187,42 @@ ipcMain.on("updater:install", () => {
   try { autoUpdater.quitAndInstall(true, true); } catch (e) {}
 });
 ipcMain.handle("app:info", () => ({ version: app.getVersion(), name: app.getName(), port: PORT, packaged: app.isPackaged }));
+
+/* ---------------- dedicated "clear the scripture list" hotkey ----------------
+   ProPresenter's API CANNOT distinguish Clear All from Clear Slide when the slide is the
+   only thing on screen — measured on PP 21.2, both report "every layer off" and
+   presentation:null. So on a rig that runs scripture with no background, no amount of
+   inference can make F1 empty the reference list while F2 keeps it. Two releases were spent
+   trading one wrong answer for the other.
+   This is the way out: a key of the operator's own, observed by the APP rather than
+   inferred from ProPresenter, so it is exact every time. It is a GLOBAL shortcut on purpose
+   — the operator is looking at ProPresenter, not at this window, so a page-level keydown
+   would never fire.
+   F5 by default because in ProPresenter that is Clear Audio, and Brandon's rig never uses
+   the audio layer. Registering it here does mean ProPresenter stops receiving F5; that is
+   the deliberate trade, and the key is configurable for anyone who does use audio. */
+let clearListKey = null;
+function setClearListKey(accel) {
+  const next = (typeof accel === "string" && accel.trim()) ? accel.trim() : null;
+  if (clearListKey && clearListKey !== next) {
+    try { globalShortcut.unregister(clearListKey); } catch (e) {}
+    clearListKey = null;
+  }
+  if (!next) return { ok: true, key: null, registered: false };
+  if (clearListKey === next) return { ok: true, key: next, registered: true };
+  let registered = false;
+  // register() returns false when another app already owns the accelerator — report that
+  // honestly instead of leaving the operator pressing a key that does nothing.
+  try { registered = globalShortcut.register(next, () => {
+    if (win && !win.isDestroyed()) win.webContents.send("lt:clear-list");
+  }); } catch (e) { registered = false; }
+  clearListKey = registered ? next : null;
+  return { ok: registered, key: next, registered };
+}
+ipcMain.handle("clearkey:set", (_e, accel) => setClearListKey(accel));
+ipcMain.handle("clearkey:get", () => ({ key: clearListKey, registered: !!clearListKey }));
+// Windows keeps system-wide hotkeys alive past quit unless they are released.
+app.on("will-quit", () => { try { globalShortcut.unregisterAll(); } catch (e) {} });
 
 /* ----- DeckLink SDI fill + key -----
    Every handler answers with a plain object rather than rejecting, so a renderer

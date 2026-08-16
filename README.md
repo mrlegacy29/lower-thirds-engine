@@ -112,20 +112,24 @@ live slide hands control back to ProPresenter. Tick **Stay on air through
 ProPresenter clears** on the element (or pick **● Always live** in its Layers
 dropdown) if it should ignore F1/F2 entirely.
 
-### Clearing: F2 vs F1
+### Clearing: F1, F2 and a key of your own
 
-**F2 / Clear Slide** takes the verse and the rest of the screen off air and
-**always keeps the scripture reference list** — entries and title. **F1 / Clear
-All** ends the session and takes the list with it.
+| Key | ProPresenter | What the engine does |
+|---|---|---|
+| **F1** | Clear All | Everything off air — the scripture list and its title included. Ends the session. |
+| **F2** | Clear Slide | Everything off air **except** the scripture reference list and event list, which keep their entries and title. |
+| **F5** | Clear Audio (unused) | **Clears the scripture list and its title on demand**, from anywhere — even while ProPresenter has focus. |
 
-One caveat worth knowing, because it is ProPresenter and not this app:
-ProPresenter reports F1 and F2 *identically* when the slide is the only thing on
-screen — both simply say "everything is off". The list therefore only empties
-when the engine can positively tell it was a Clear All (something else, e.g. a
-background layer, was up and went down with the slide). When it cannot tell, the
-list is kept — losing a sermon's references is not recoverable, keeping them is
-one click. Use **Clear scripture list** in the Layers row to end the session on
-any rig.
+F1 and F2 are told apart by whether ProPresenter still reports the deck as
+active: Clear Slide leaves it active, Clear All clears it. The app **learns**
+that the first time it watches a live slide go off with the deck still up, so it
+adapts to your rig instead of assuming. If your ProPresenter genuinely reports
+the two identically, the Connection panel says so — use F5, and
+*Connection → Teach the app your clear keys* will measure it for you.
+
+F5 is configurable (or can be turned off) under **Connection → Dedicated clear
+key**. It takes the key over system-wide, so ProPresenter stops receiving it —
+fine if you never use the audio layer.
 
 ### The Layers row — every layer, one click
 

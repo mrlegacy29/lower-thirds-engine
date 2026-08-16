@@ -1791,9 +1791,23 @@ function isFullClear(rule, layer, signals){
    own control ends the session deterministically.
    The other rules are honoured as chosen: "pres"/"layer" are explicit operator picks about
    which signal to trust, and "manual" already means "never auto-clear". */
-function isListClear(rule, layer, signals){
+function isListClear(rule, layer, signals, ambig){
   if(!signals) return false;
-  if(rule==="all"||!rule) return signals.allOffSure===true;
+  if(rule==="all"||!rule){
+    /* BEST AVAILABLE EVIDENCE, IN ORDER.
+       1. The presentation field, once the poller has WATCHED it separate the two keys on
+          this rig (presTells). This is the only signal that works when the slide is the only
+          thing on screen, which is how a sermon is actually run — deck still active means
+          Clear Slide, deck cleared means Clear All. It is checked first precisely because
+          the layer rules below are blind in exactly that case. */
+    if(signals.presTells===true) return signals.presPopulated===false;
+    if(signals.allOffSure===true) return true;          // 2. positively a Clear All
+    // AMBIGUOUS: every layer off with nothing to attribute it to. F1 and F2 are identical
+    // here and no rule can separate them, so the operator picks which way it falls
+    // (Connection -> "When F1 and F2 look identical"). Default "all": Brandon asked for the
+    // list to go on F1, and the dedicated clear key is what gives him an F2-safe clear.
+    return (ambig!=="keep") && signals.allOff===true;
+  }
   return isFullClear(rule, layer, signals);
 }
 /* ProPresenter's presentation payload nests slides inside named groups, but the live
@@ -1872,6 +1886,18 @@ function createPP(opts){
      that Clear All would have taken down too?". Only then is an all-off reading POSITIVE
      evidence of Clear All. */
   let sawNonSlide=false, prevSlideOn=false;
+  /* DOES THIS RIG'S PRESENTATION FIELD SEPARATE THE TWO CLEAR KEYS?
+     F2 (Clear Slide) clears only the slide layer; F1 (Clear All) clears the lot. On a rig
+     where the deck stays ACTIVE through F2, /v1/presentation/active is the one signal that
+     tells them apart even when the slide is the only thing on screen — and it is the signal
+     a note from August said was useless, which is why three releases guessed from layers
+     instead and kept getting it wrong on Brandon's machine.
+     So stop asserting and observe: the moment we see the slide layer OFF while the
+     presentation is still ACTIVE, we have watched a Clear Slide that the presentation field
+     distinguishes, and from then on that field is authoritative here. If it never happens,
+     this rig genuinely cannot tell them apart and we say so rather than pretending.
+     Latches for the session; a reconnect re-learns. */
+  let presTells=false;
   function noteLayerEvidence(map,slideIsOn){
     if(map && slideIsOn){
       let other=false;
@@ -2015,7 +2041,15 @@ function createPP(opts){
       // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
       const cleared = (active===false) || (active===null && !slideText.trim());
       const clearAll = (allClr===true);
+      const _wasSlideOn=prevSlideOn;      // capture BEFORE noteLayerEvidence advances it
       noteLayerEvidence(layersMap, active===true);
+      // Learn it: a slide that WAS on air is now off while the presentation is still active
+      // — that is a Clear Slide this rig reports distinguishably. See presTells.
+      // The _wasSlideOn edge is load-bearing: at boot, and any time nothing is live, the
+      // slide layer is already off while a deck sits open and active, which is not a clear
+      // at all. Without it the flag latched during startup and every F2 was then read as a
+      // Clear All — the exact bug this is here to end.
+      if(_wasSlideOn && active===false && presPop===true) presTells=true;
       // group/label ride along so a look can route by them, and so the console's diagnostic
       // strip can show the operator what the engine is actually seeing.
       // allOffSure: an all-off reading we can actually ATTRIBUTE to Clear All, because
@@ -2023,6 +2057,7 @@ function createPP(opts){
       // false the two keys are indistinguishable — see sawNonSlide.
       const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll,
                         allOffSure: clearAll && sawNonSlide,
+                        presTells: presTells,
                         group:slideGroup, label:slideLabel };
       const sigKey = active+"|"+presPop+"|"+JSON.stringify(layersMap||0);
       // Callback exceptions are contained: a render error must never stop the feed.
@@ -2092,7 +2127,7 @@ function createPP(opts){
     }catch(e){ /* optional enrichment — never let it affect the feed */ }
   }
   return {
-    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;unknownLayers=0;layerFails=0;sawNonSlide=false;prevSlideOn=false;
+    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;unknownLayers=0;layerFails=0;sawNonSlide=false;prevSlideOn=false;presTells=false;
       lastKey="";lastSigKey="";lastActive=null;lastAllClr=null;lastLayers=null;lastPres=null;
       // A reconnect must re-offer the deck's labels: presSig is what suppresses a repeat
       // fire, and without clearing it a fresh connect to the same deck would leave the
@@ -3129,7 +3164,7 @@ if(isOutput){
       // Clear All, because on a rig with no background layer F2 and F1 read identically and
       // `full` is true for both. Guessing wrong here throws away the whole sermon's
       // references with no way to get them back. See isListClear.
-      const listClr=isListClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
+      const listClr=isListClear(cn.clearRule||"all", cn.clearLayer||"media", signals, cn.ambigList);
       if(listClr && histWantsClear()){ history.length=0; stage.setHistory(history); }
       if(listClr) everShown=false;                             // only a real Clear All ends the session
       stage.setHeaderHold(everShown && !listClr);              // the TITLE rides with its list, not with `full`
@@ -3159,12 +3194,28 @@ if(isOutput){
     // setHeaderHold(true), so ANY text on air — a worship-song lyric, a sermon point, an
     // announcement — put an empty "Previously Referenced" plate on air and left it there for
     // the whole set. Only an actual scripture reference opens the list.
-    if(sc&&sc.ref) everShown=true;
+    // NOT for a reference the manual clear is suppressing: the operator just emptied the
+    // list while that verse was still on screen, so raising the header again would park
+    // "Previously Referenced" on air over nothing — the bare-plate failure this file has
+    // fought twice already. The header comes back with the next real entry.
+    if(sc&&sc.ref&&sc.ref!==histSkipRef) everShown=true;
     stage.setHeaderHold(everShown);
-    if(sc){ stage.setLive(sc); if(sc.ref)pushHist(sc.ref); }    // set live first, then log (clean exclude-live)
+    if(sc){ stage.setLive(sc); if(sc.ref){ lastLiveRef=sc.ref; pushHist(sc.ref); } }    // set live first, then log (clean exclude-live)
     else { stage.setLive({ref:"",body:text.trim(),translation:"",rawText:text.trim()}); } // non-scripture slide
   }
-  function pushHist(ref){ if(!ref)return; const last=history[history.length-1]; if(last&&last.ref===ref)return; history.push({id:++histId,ref}); stage.setHistory(history); }
+  /* histSkipRef: the verse that was ON SCREEN when the operator cleared the list by hand.
+     A BACKSTOP, not the main mechanism — the poller already suppresses a repeat onUpdate for
+     an unchanged slide, so a clear normally sticks on its own. This covers the cases where
+     onUpdate DOES re-fire while the same verse is up: the slide's group/label changes, the
+     operator reconnects, or a new config arrives. Without it the list the operator just
+     emptied repopulates itself with the verse still on screen. Cleared as soon as any OTHER
+     reference appears, so the next verse logs normally. */
+  let histSkipRef="";
+  function pushHist(ref){ if(!ref)return;
+    if(ref===histSkipRef) return;
+    histSkipRef="";
+    const last=history[history.length-1]; if(last&&last.ref===ref)return; history.push({id:++histId,ref}); stage.setHistory(history); }
+  let lastLiveRef="";
 
   const dataFeed=createDataFeed((v)=>stage.setVars(v));
   let lastDataSrc=JSON.stringify((program.data&&program.data.sources)||[]);
@@ -3192,7 +3243,7 @@ if(isOutput){
       // of reloading /output. No poller means nothing is asserting a clear, so release it.
       if(!program.conn.host) stage.setCleared("none");
       else pp.connect(program.conn.host,program.conn.port,program.conn.pollMs); }
-    if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }  // manual "Clear list": drop the HEADER too, or a bare plate is left on air
+    if(merged._clearHist && merged._clearHist!==lastClearHist){ lastClearHist=merged._clearHist; history.length=0; histSkipRef=lastLiveRef; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }  // manual "Clear list": drop the HEADER too, or a bare plate is left on air
     if(merged._take && merged._take!==lastTake){ lastTake=merged._take; stage.replayVisible(); }
   });
   // storage event (same browser, other tab)
@@ -3209,7 +3260,7 @@ if(isOutput){
     // is unreachable, which is exactly when a stranded blank output is hardest to diagnose.
     if(cc){pp.stop(); if(!program.conn.host) stage.setCleared("none");
       else pp.connect(program.conn.host,program.conn.port,program.conn.pollMs);}
-    if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }
+    if(c._clearHist && c._clearHist!==lastClearHist){ lastClearHist=c._clearHist; history.length=0; histSkipRef=lastLiveRef; everShown=false; stage.setHistory(history); stage.setHeaderHold(false); }
     if(c._take && c._take!==lastTake){ lastTake=c._take; stage.replayVisible(); } }catch(err){} } });
 
   const ro=new ResizeObserver(()=>fitScaler(scaler,rootStage)); ro.observe(rootStage); fitScaler(scaler,rootStage);
@@ -3322,9 +3373,122 @@ if(!isOutput){
   // The operator asked for the list to GO, so the header goes with it. clearLog() alone
   // left a bare "Previously Referenced" plate on the monitors (and on air) with nothing
   // under it, and this button was the only control offered to remove it.
+  /* ---- the dedicated clear key ----
+     Registered by the Electron main process as a GLOBAL shortcut, because the operator is
+     looking at ProPresenter when they press it — a keydown handler on this page would never
+     see it. Settings live in their OWN localStorage key, deliberately NOT in the config: it
+     is per-machine plumbing like the SDI settings, so it must not travel in a Take or make
+     the TAKE button read "pending". */
+  const LS_CLEARKEY="pplt.clearkey.v1";
+  const CLEARKEY_DEF={key:"F5",on:true};
+  function clearKeyCfg(){ const c=lsGet(LS_CLEARKEY,CLEARKEY_DEF); return {key:c.key||"F5",on:c.on!==false}; }
+  let _clearKeyState={registered:false,conflict:false};
+  function applyClearKey(){
+    const d=window.ltDesktop; if(!d||!d.clearKey) return;
+    const c=clearKeyCfg();
+    Promise.resolve(d.clearKey.set(c.on?c.key:null)).then(r=>{
+      // register() fails when another app already owns the accelerator. Saying nothing here
+      // would leave the operator pressing a key that does nothing, which is precisely the
+      // failure this whole feature exists to end.
+      _clearKeyState={registered:!!(r&&r.registered),conflict:!!(c.on&&r&&!r.registered)};
+      const n=$("clearKeyStat"); if(n) paintClearKeyStat(n);
+    }).catch(()=>{});
+  }
+  function paintClearKeyStat(n){
+    const c=clearKeyCfg();
+    if(!c.on){ n.textContent="off"; n.style.color="var(--faint)"; return; }
+    if(_clearKeyState.conflict){ n.textContent="✕ "+c.key+" is taken by another app"; n.style.color="var(--live)"; return; }
+    if(_clearKeyState.registered){ n.textContent="● "+c.key+" armed"; n.style.color="var(--ok)"; return; }
+    n.textContent="…"; n.style.color="var(--faint)";
+  }
+  /* ---- clear-key trainer ----
+     Captures the live signal set at the moment the operator presses each key, then picks the
+     rule that TELLS THEM APART on this rig:
+       "pres"  presentation goes null on Clear All but stays populated on Clear Slide
+       "layer" some single layer is on for one and off for the other
+       "all"   every layer off distinguishes them
+     If nothing separates them, it says so plainly and points at the dedicated key, instead
+     of silently choosing a rule that is wrong half the time. */
+  let _trainF2=null,_trainF1=null,_trainMsg="";
+  function snapSignals(){ return _lastSignals?clone(_lastSignals):null; }
+  function trainPick(){
+    const a=_trainF2,b=_trainF1;                       // a = Clear Slide, b = Clear All
+    if(!a||!b) return null;
+    if(a.presPopulated===true && b.presPopulated===false) return {rule:"pres",why:"the presentation stays active on Clear Slide and goes clear on Clear All"};
+    const la=a.layers||{}, lb=b.layers||{};
+    const names=["media","props","messages","announcements","video_input","audio"];
+    for(const n of names){ if(la[n]===true && lb[n]===false) return {rule:"layer",layer:n,why:"the "+n+" layer stays on for Clear Slide and goes off for Clear All"}; }
+    if(a.allOff!==true && b.allOff===true) return {rule:"all",why:"Clear Slide leaves something on screen and Clear All turns everything off"};
+    return null;
+  }
+  function clearTrainRow(cn){
+    const stat=el("p",{class:"hint",style:"margin-top:4px"});
+    const paint=()=>{
+      if(_trainMsg){ stat.innerHTML=_trainMsg; return; }
+      stat.textContent=(_trainF2?"✓ Clear Slide captured. ":"Step 1: put a verse up, press F2, then click “I pressed F2”. ")+
+                       (_trainF2&&!_trainF1?"Step 2: press F1, then click “I pressed F1”.":"");
+    };
+    const cap=(which)=>{
+      const s=snapSignals();
+      if(!s){ _trainMsg='<b style="color:var(--live)">No live signals yet — connect to ProPresenter first.</b>'; paint(); return; }
+      if(which==="f2"){ _trainF2=s; _trainF1=null; _trainMsg=""; }
+      else{
+        _trainF1=s;
+        const pick=trainPick();
+        if(!pick){
+          _trainMsg='<b style="color:var(--live)">ProPresenter reports F1 and F2 identically on this rig.</b> '+
+            'Nothing in its API separates them, so the list cannot be cleared by F1 alone — use the dedicated key below. '+
+            '(If you expected a difference, make sure a verse was actually on screen before each press, and try again.)';
+        } else {
+          cn.clearRule=pick.rule; if(pick.layer)cn.clearLayer=pick.layer;
+          cn._ruleMig=true; cn._ruleMig2=true;          // a measured pick must survive the migration
+          cn.ambigList="keep";                          // no longer guessing, so never guess
+          savePreview();
+          _trainMsg='<b style="color:var(--ok)">Measured:</b> '+escapeHtml(pick.why)+'. Detection set to <b>'+
+            escapeHtml({pres:"Presentation cleared",layer:"A layer turns off",all:"All layers off"}[pick.rule])+'</b>'+
+            (pick.layer?' ('+escapeHtml(pick.layer)+')':'')+'. Press <b>TAKE</b> to send it to the OBS output.';
+        }
+      }
+      paint(); renderPanels();
+    };
+    paint();
+    return el("div",null,[
+      el("div",{class:"row"},[
+        el("button",{class:"btn sm",style:"flex:1",text:"I pressed F2 (Clear Slide)",onclick:()=>cap("f2")}),
+        el("button",{class:"btn sm",style:"flex:1",text:"I pressed F1 (Clear All)",onclick:()=>cap("f1")})
+      ]),
+      stat
+    ]);
+  }
+  function clearKeyRow(){
+    if(!(window.ltDesktop&&window.ltDesktop.clearKey))
+      return el("p",{class:"hint",text:"Available in the desktop app only — a browser cannot claim a key while ProPresenter has focus."});
+    const c=clearKeyCfg();
+    const KEYS=["F5","F6","F7","F8","F9","F10","F11","CommandOrControl+F5","CommandOrControl+Shift+C"];
+    const stat=el("b",{id:"clearKeyStat",style:"font-family:var(--mono);font-size:11px"});
+    setTimeout(()=>{ try{ paintClearKeyStat(stat); }catch(e){} },0);
+    return el("div",null,[
+      rowToggle("Use a dedicated key to clear the scripture list",c.on,(v)=>{ lsSet(LS_CLEARKEY,{key:clearKeyCfg().key,on:v}); applyClearKey(); renderPanels(); }),
+      c.on?rowSelect("Key",c.key,KEYS.map(k=>[k,k]),(v)=>{ lsSet(LS_CLEARKEY,{key:v,on:true}); applyClearKey(); renderPanels(); }):null,
+      el("div",{class:"row",style:"justify-content:space-between"},[el("span",{class:"fld",text:"Status"}),stat])
+    ]);
+  }
   function manualClearList(){ clearLog();
     logEverShown=false; pvStage.setHeaderHold(false); pgStage.setHeaderHold(false);
     _clearNonce=Math.max(Date.now(),_clearNonce+1); const c=clone(program); c._clearHist=_clearNonce; bus.publish(c); }
+  // Arm the dedicated key at boot, and clear on every press. No confirm(): this is a key the
+  // operator chose and pressed deliberately, and a modal in front of ProPresenter mid-service
+  // is worse than the thing it is guarding.
+  if(window.ltDesktop&&window.ltDesktop.clearKey){
+    try{ window.ltDesktop.clearKey.onFire(()=>{ manualClearList(); flashClearKey(); }); }catch(e){}
+    applyClearKey();
+  }
+  // Visible acknowledgement on the console, so a press that landed is distinguishable from
+  // one that did not — the operator is watching ProPresenter, so they check afterwards.
+  function flashClearKey(){
+    const b=$("logoBtns")&&[...$("logoBtns").querySelectorAll("button")].find(x=>/Clear scripture list/i.test(x.textContent));
+    if(b) flash(b,"Scripture list cleared");
+  }
   // live readout of the clear-detection signals (layer states + presentation status) for the Clear Behavior panel
   let _lastSignals=null;
   function renderClearDiag(s){ if(s)_lastSignals=s; const box=$("clearDiag"); if(!box||!_lastSignals)return;
@@ -3394,8 +3558,8 @@ if(!isOutput){
         // isListClear, matching the output page: clearKind is what decides whether the
         // running lists stay ON AIR, so an ambiguous clear must land on "slide" or the list
         // disappears from the monitors while its contents are still there.
-        pgStage.setCleared(isListClear(_pgcn0.clearRule||"all",_pgcn0.clearLayer||"media",signals)?"all":"slide");
-        pvStage.setCleared(isListClear(_pvcn0.clearRule||"all",_pvcn0.clearLayer||"media",signals)?"all":"slide");
+        pgStage.setCleared(isListClear(_pgcn0.clearRule||"all",_pgcn0.clearLayer||"media",signals,_pgcn0.ambigList)?"all":"slide");
+        pvStage.setCleared(isListClear(_pvcn0.clearRule||"all",_pvcn0.clearLayer||"media",signals,_pvcn0.ambigList)?"all":"slide");
       } else {
         // A live slide retires the Logo row's manual "show it anyway" override on BOTH
         // configs, so it cannot survive into the next Clear All.
@@ -3418,8 +3582,8 @@ if(!isOutput){
       // output's, so if one guesses and the other demands proof they drift apart and the
       // Program monitor stops matching air. See isListClear for why the list refuses to act
       // on an ambiguous clear.
-      const _pgFull=isListClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
-      const _pvFull=isListClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
+      const _pgFull=isListClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals,_pgcn.ambigList);
+      const _pvFull=isListClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals,_pvcn.ambigList);
       if(_pgFull && historyWantsClear(program)) clearLog();
       // Reset on the PROGRAM rule alone. logEverShown is the console's twin of the output
       // page's everShown, and the output page keys off program.conn only — so requiring
@@ -4889,7 +5053,36 @@ if(!isOutput){
         (function(){ const n=el("div",{id:"clearDiag",style:"margin:6px 0 4px;min-height:22px",html:"<span style=\"font-family:var(--mono,monospace);font-size:11px;color:var(--muted,#8aa)\">connect to ProPresenter to see live layer status</span>"});
           setTimeout(()=>{ try{ renderClearDiag(); }catch(e){} },0); return n; })(),
         el("div",{class:"row"},[el("button",{class:"btn sm full",text:"Clear scripture list now",onclick:()=>{manualClearList();}})]),
-        el("p",{class:"hint",html:"<b>All layers off</b> (recommended) keeps the list up on Clear Slide and removes it on Clear All. Measured on ProPresenter 21.2: Clear Slide leaves <i>media</i> on, Clear All turns everything off — while <i>presentation</i> reports cleared for <b>both</b>, so “Presentation cleared” cannot tell them apart on that build. Use it only if the live readout above shows otherwise on your rig. Changes reach the OBS output after the next <b>Take</b>."})
+        el("p",{class:"hint",html:"<b>All layers off</b> (recommended) keeps the list up on Clear Slide and removes it on Clear All. Measured on ProPresenter 21.2: Clear Slide leaves <i>media</i> on, Clear All turns everything off — while <i>presentation</i> reports cleared for <b>both</b>, so “Presentation cleared” cannot tell them apart on that build. Use it only if the live readout above shows otherwise on your rig. Changes reach the OBS output after the next <b>Take</b>."}),
+
+        /* MEASURE THE RIG INSTEAD OF ARGUING ABOUT IT.
+           Three releases were spent guessing which signal separates Clear All from Clear
+           Slide, from a note measured on one machine in August. The app polls every signal
+           already — so it can simply WATCH the operator press each key and report what
+           actually changed, then pick the rule that works here. No more inference, and no
+           more me being wrong about someone else's ProPresenter. */
+        el("div",{class:"gh",text:"Teach the app your clear keys"}),
+        el("p",{class:"hint",text:"Put a verse on screen, then follow the two steps. The app watches what ProPresenter reports for each key and picks the detection rule that actually separates them on THIS machine."}),
+        clearTrainRow(cn),
+
+        /* THE AMBIGUOUS CASE, MADE EXPLICIT.
+           When the slide is the only thing on screen, F1 and F2 produce byte-identical
+           readings — every layer off, presentation cleared — so NO rule above can separate
+           them. The app used to silently pick one answer and get it wrong for half the
+           people: guessing "Clear All" destroyed the list on every F2 between sermon points;
+           guessing "Clear Slide" left it up through F1. It is a coin toss, so it is the
+           operator's coin, and the dedicated key below sidesteps it entirely. */
+        el("div",{class:"gh",text:"When F1 and F2 look identical"}),
+        rowSeg("Then treat the clear as",(cn.ambigList==="all")?"all":"keep",
+          [["keep","Clear Slide — keep the list"],["all","Clear All — empty the list"]],
+          (v)=>{cn.ambigList=v;savePreview();renderPanels();}),
+        el("p",{class:"hint",html:(cn.ambigList==="all")
+          ? "The list will empty on <b>F1 — and on F2 as well</b>, because on this rig ProPresenter reports them identically. Use the dedicated key below if you want F2 to keep the list."
+          : "The list survives a clear the app cannot attribute, so <b>F2 never destroys it</b> — and <b>F1 will not empty it either</b>. Use the dedicated key below to end the session."}),
+
+        el("div",{class:"gh",text:"Dedicated clear key"}),
+        clearKeyRow(),
+        el("p",{class:"hint",html:"A key the APP watches directly, so it is exact — no guessing from ProPresenter. It works while ProPresenter has focus, and clears the list, its title and the event list immediately on air. <b>F5</b> is ProPresenter's <i>Clear Audio</i>; if you never use the audio layer that key is free, and this takes it over. Desktop app only."})
       ])
     ],false,"conn");
   }

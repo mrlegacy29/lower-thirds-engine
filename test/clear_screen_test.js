@@ -117,6 +117,22 @@ const buildCfg = (over) => {
 };
 const push = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({ data: JSON.stringify({ type: 'program', cfg }) }); };
 const air = () => onAirText(D, W, '#out-scaler');
+// The reference-list CHIPS only. Needed to tell "this verse is in the list" apart from
+// "this verse is the live one the scripture element is rendering" — they carry the same
+// text, so a whole-stage read cannot distinguish them, and a manual clear that immediately
+// re-logs the on-screen verse would pass unnoticed.
+const { painted } = require('./_onair');
+// Scoped to the SCRIPTURE reference list specifically: the event list renders the same
+// .h-items/.h-chip markup, so an unscoped selector reports its items as scripture entries
+// and "the list is empty" can never be true.
+const listChips = () => {
+  const wrap = [...D.querySelectorAll('#out-scaler .lt-el')].find(e => {
+    const h = e.querySelector('.h-label');
+    return h && /previously referenced/i.test(h.textContent || '');
+  }) || [...D.querySelectorAll('#out-scaler .lt-el')].find(e => e.querySelector('.h-items') && !/EVENTITEM/.test(e.textContent));
+  if (!wrap) return [];
+  return [...wrap.querySelectorAll('.h-items .h-chip .tx')].filter(n => painted(n, W, D)).map(n => n.textContent.trim());
+};
 const onAir = (m) => air().includes(m);
 const allOn = () => ALL_MARKS.filter(onAir);
 const allOff = () => ALL_MARKS.filter(m => !onAir(m));
@@ -264,19 +280,12 @@ const allOff = () => ALL_MARKS.filter(m => !onAir(m));
     // F2 here is byte-identical to F1: everything off, nothing to attribute it to.
     slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
     await sleep(700);
-    ok('no-background F2: the list SURVIVES', onAir('John 3:16') && onAir('Romans 8:28'));
-    ok('no-background F2: the TITLE survives', /PREVIOUSLY REFERENCED/i.test(air()));
-    ok('no-background F2: the verse still comes off air', !onAir('And we know'));
-    ok('no-background F2: and so does everything else', !onAir(MARKERS.sermonTitle) && !onAir(MARKERS.logo));
+    // presActive=false above means this rig gives the app NOTHING to separate the keys with,
+    // so it falls back to the operator's ambiguity setting (default: treat as Clear All).
+    // The rig that actually distinguishes them is covered by the "F2 keeps the deck active"
+    // block below, which is Brandon's real setup.
+    ok('no-background + no presentation signal: falls back to the ambiguity default', !onAir('John 3:16'));
 
-    // ...and it keeps surviving across repeated clears, which is what a sermon actually does.
-    for (let i = 0; i < 3; i++) {
-      slideText = 'Psalm 23:' + (i + 1) + '\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = NOBG_LIVE;
-      await sleep(300);
-      slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
-      await sleep(300);
-    }
-    ok('no-background: the list survives a whole sermon of F2s', onAir('John 3:16') && onAir('Psalm 23:3'));
 
     // A rig WITH a background layer can still positively identify Clear All, and there the
     // list must still clear — otherwise this fix would just disable the feature.
@@ -319,6 +328,85 @@ const allOff = () => ALL_MARKS.filter(m => !onAir(m));
     layersFail = false;
     await sleep(400);
     ok('latch: and it recovers cleanly when the endpoint returns', onAir('To proclaim the year'));
+  }
+
+  /* ================= BRANDON'S RIG: F1 / F2 / F5, no background layer =================
+     The setup that three releases got wrong: scripture only, nothing else on screen. The
+     LAYER readings for F1 and F2 are identical there (everything off), so the layer rules
+     are blind — but ProPresenter's key map is not ambiguous at all:
+        F1 Clear All   -> deck cleared      (presentation: null)
+        F2 Clear Slide -> deck still ACTIVE (presentation: populated)
+     The poller LEARNS that the presentation field separates them the first time it watches a
+     live slide go off with the deck still active, and from then on that field decides. What
+     the operator must see:
+        F1  everything goes, list and title included
+        F2  the scripture list and its title stay up, everything else goes
+        F5  a dedicated key clears the list and title on demand  (see the _clearHist path) */
+  {
+    const NOBG_LIVE = { slide: true,  media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
+    push(buildCfg({ _take: ++take })); await sleep(250);
+
+    const liveVerse = async (ref, body) => {
+      slideText = ref + '\n' + body; slideActive = true; presActive = true; layersObj = NOBG_LIVE; await sleep(350);
+    };
+    // F2: slide layer off, deck STILL ACTIVE
+    const pressF2 = async () => { slideText = ''; slideActive = false; presActive = true; layersObj = ALL_OFF; await sleep(600); };
+    // F1: slide layer off, deck CLEARED
+    const pressF1 = async () => { slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF; await sleep(600); };
+
+    await liveVerse('John 3:16', 'For God so loved the world.');
+    await liveVerse('Romans 8:28', 'And we know.');
+    ok('rig: two verses are logged while live', onAir('John 3:16') && onAir('Romans 8:28'));
+
+    await pressF2();
+    ok('rig F2: the scripture list STAYS', onAir('John 3:16') && onAir('Romans 8:28'));
+    ok('rig F2: its TITLE stays', /PREVIOUSLY REFERENCED/i.test(air()));
+    ok('rig F2: the verse comes off air', !onAir('And we know'));
+    ok('rig F2: and so does everything else', !onAir(MARKERS.sermonTitle) && !onAir(MARKERS.logo) && !onAir(MARKERS.qr));
+
+    // ...and it holds across a whole sermon of F2s, which is the actual complaint.
+    for (let i = 1; i <= 3; i++) { await liveVerse('Psalm 23:' + i, 'The Lord is my shepherd.'); await pressF2(); }
+    ok('rig F2: the list survives a whole sermon of clears', onAir('John 3:16') && onAir('Psalm 23:3'));
+    ok('rig F2: the title survives with it', /PREVIOUSLY REFERENCED/i.test(air()));
+
+    // F1 must end the session: everything, list and title included.
+    await liveVerse('Acts 2:42', 'They devoted themselves.');
+    await pressF1();
+    ok('rig F1: the scripture list is GONE', !onAir('John 3:16') && !onAir('Acts 2:42'));
+    ok('rig F1: the title is GONE', !/PREVIOUSLY REFERENCED/i.test(air()));
+    ok('rig F1: nothing whatsoever is left on air', air().trim() === '');
+
+    // ...and the next slide brings the screen back, list re-accumulating from empty.
+    await liveVerse('Luke 15:7', 'There is joy in heaven.');
+    ok('rig: the next live slide restores the screen', allOff().length === 0);
+    ok('rig: the list restarts empty after F1', !onAir('John 3:16') && onAir('Luke 15:7'));
+
+    // F5 — the dedicated key. The desktop app turns the global shortcut into the SAME
+    // _clearHist broadcast the "Clear scripture list" button sends, so exercising that
+    // broadcast is exercising F5 end to end on the page OBS actually renders.
+    await liveVerse('Micah 6:8', 'He has shown you what is good.');
+    ok('rig F5 setup: the list has entries to clear', onAir('Luke 15:7') && onAir('Micah 6:8'));
+    {
+      const cfg = buildCfg({ _take: take, _clearHist: 9001 });
+      push(cfg); await sleep(400);
+      // Luke 15:7 exists ONLY as a list chip, so its absence is the list emptying. Micah 6:8
+      // is deliberately NOT asserted gone: it is the verse ProPresenter still has on screen,
+      // rendered by the scripture element, and F5 clears the list — not the live verse.
+      ok('rig F5: the scripture list is cleared on demand', listChips().length === 0);
+      // The verse ProPresenter still has UP must not walk straight back into the list on the
+      // next poll — a clear that undoes itself in under a second is not a clear.
+      await sleep(600);
+      ok('rig F5: ...and STAYS cleared while that verse is still live', listChips().length === 0);
+      ok('rig F5: the live verse itself is untouched', onAir('He has shown you what is good'));
+      // Asserted BEFORE the next verse, or it measures the header legitimately coming back.
+      ok('rig F5: the title goes with it', !/PREVIOUSLY REFERENCED/i.test(air()));
+      ok('rig F5: and it does NOT disturb the rest of the screen',
+         onAir(MARKERS.sermonTitle) && onAir(MARKERS.logo));
+      // ...and the list starts working again on the NEXT reference, title included.
+      await liveVerse('Titus 2:11', 'The grace of God has appeared.');
+      ok('rig F5: the list resumes logging on the next verse', listChips().indexOf('Titus 2:11') >= 0);
+      ok('rig F5: ...and the title comes back with it', /PREVIOUSLY REFERENCED/i.test(air()));
+    }
   }
 
   console.log('CLEAR-SCREEN RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));
