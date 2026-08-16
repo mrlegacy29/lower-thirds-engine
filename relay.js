@@ -22,6 +22,20 @@ const fs   = require("fs");
 const path = require("path");
 const url  = require("url");
 
+/* Ceiling on a /config POST.
+   This was 5,000,000 bytes and it was WRONG — not as a safety valve, but as a product
+   decision. A look with a church logo and a background loop embedded as base64 goes past
+   5 MB easily, and every Take then answered 413: nothing reached OBS, the output sat blank,
+   and the only clue was a red line in the corner of the console. Brandon hit exactly that
+   mid-service. There is no reason for a tight cap here — the relay listens on 127.0.0.1
+   only, the client is the operator's own app on the same machine, and the body is written
+   straight into one in-memory object.
+   It is not UNLIMITED: an unbounded POST is a way to OOM the process that is holding the
+   OBS output up, which is the one thing that must never die mid-service. 512 MB is far
+   above any real look and far below the point where a modern PC is in trouble.
+   Env override for anyone who genuinely needs more. */
+const CONFIG_MAX = Math.max(5e6, parseInt(process.env.LT_CONFIG_MAX || "", 10) || 512 * 1024 * 1024);
+
 // Headers for the two routes that serve the app itself (/ and /output). frame-ancestors
 // 'none' + X-Frame-Options DENY stop any other page on the machine from framing the
 // operator console, which carries a one-click TAKE.
@@ -161,14 +175,14 @@ function createServer(htmlFile) {
       req.on("data", (c) => {
         if (tooBig) return;
         len += c.length;
-        if (len > 5e6) {
+        if (len > CONFIG_MAX) {
           // Do NOT req.destroy() here: killing the socket means the 413 never reaches
           // the console, so an over-size Take failed silently and the operator was told
           // it was on air. Stop buffering, answer honestly, then close.
           tooBig = true; chunks.length = 0;
           cors(res, req);
           res.writeHead(413, { "Content-Type": "application/json", "Connection": "close" });
-          res.end(JSON.stringify({ ok: false, error: "config too large", limit: 5e6 }));
+          res.end(JSON.stringify({ ok: false, error: "config too large", limit: CONFIG_MAX }));
           return;
         }
         chunks.push(c);
@@ -295,7 +309,7 @@ function createServer(htmlFile) {
     /* ----- local media, OBS-style ------------------------------------------------
        Serves a local media file to the output/console pages, so a look can point at
        C:\Videos\loop.mp4 instead of embedding it. Embedding pays base64 x 4/3 into a
-       config capped at 5 MB three lines up — a 4 K worship loop can never fit — while
+       config (see CONFIG_MAX above) and blows past what localStorage can hold — while
        a served file costs the config ~100 bytes. This is the same trick OBS itself
        uses ("Local file" on a media source): the page is http-served, and an http page
        may not load file:// subresources, so the server hands the file over http.

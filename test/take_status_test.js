@@ -1,6 +1,6 @@
 // A TAKE that the relay REFUSES must never look like a success.
 //
-// This shipped: publish() computed three specific failure strings ("over 5 MB", "not
+// This shipped: publish() computed three specific failure strings ("too large", "not
 // reachable", "answered N"), but the only onStatus subscriber had signature (ok) and threw
 // the message away, and it wrote solely to #relayPill/#relayTxt/#relDot — which live in
 // .side/.topbar and are display:none under #console-root.op. So in Showcaller and Simple,
@@ -8,9 +8,12 @@
 // #btnTrans still flashed green and the caption still read "you are live". OBS meanwhile
 // kept showing the previous look.
 //
-// The realistic trigger is not a dead relay (main.js hosts it in-process): it is a look
-// carrying an imported image/video. lt.html caps a video import at 8 MB and inlines it as a
-// base64 data URI, which is ~10.7 MB — over relay.js's 5 MB cap, answered 413.
+// The 413 path itself is now nearly unreachable in practice — relay.js's CONFIG_MAX was
+// raised from 5 MB to 512 MB on 2026-08-10 after a real service was lost to it: a look
+// carrying an embedded logo + background loop failed EVERY Take, so the OBS output sat
+// blank all morning with only a red line in the corner of the console to say why. The
+// reporting path still has to work, because a 413 is still what the relay answers if
+// someone ever does exceed it — so this suite forces the response rather than the size.
 const { JSDOM } = require('jsdom');
 const path = require('path');
 const html = require('fs').readFileSync(path.join(__dirname, '..', 'lt.html'), 'utf8');
@@ -82,7 +85,7 @@ async function run(skin, status) {
     failTextOnScreen: vis.some(t => /fail|too large|not reach|not respond|previous look/i.test(t)),
     // the SPECIFIC diagnosis, not just "something went wrong" — this is what tells the
     // operator the look is too big to send, which is the actual fix they need
-    specificOnScreen: vis.some(t => /too large to send/i.test(t)),
+    specificOnScreen: vis.some(t => /too large for the local server/i.test(t) && /local file/i.test(t)),
   };
   try { dom.window.close(); } catch (e) {}
   return res;
@@ -94,7 +97,7 @@ async function run(skin, status) {
     ok(skin + ': a refused TAKE does NOT flash success', !/flashok/.test(bad.cls));
     ok(skin + ': a refused TAKE flashes failure', /flashfail/.test(bad.cls));
     ok(skin + ': the failure is actually ON SCREEN', bad.failTextOnScreen);
-    ok(skin + ': and says WHY (the 5 MB message publish() computes)', bad.specificOnScreen);
+    ok(skin + ': and says WHY, naming the fix that works (link the file)', bad.specificOnScreen);
 
     const good = await run(skin, 200);
     ok(skin + ': an accepted TAKE still flashes success', /flashok/.test(good.cls));

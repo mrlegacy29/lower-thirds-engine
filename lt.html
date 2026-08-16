@@ -264,6 +264,20 @@
      loudest state in the console — the operator must never wonder whether it is up. */
   .simbtn.live{border-color:#2c5740;background:rgba(48,209,88,.12);color:var(--ok)}
   #console-root.skin-simple .simbtn.live{background:#e6f8ec;border-color:#38b45f;color:#14663a}
+  /* The ProPresenter feed toggle read "Live ProPresenter feed: ON/OFF" in the same grey as
+     every other button, so which state it was in came down to reading one word — the thing
+     nobody does mid-service. Colour-coded on the broadcast convention Brandon asked for:
+     RED = live (a real feed is driving the graphics), GREEN = off (safe / sample mode).
+     Filled, not outlined, so it reads across the room at a glance. */
+  /* Visible in EVERY skin, including the operator views that hide the whole builder panel —
+     this is the message that has to reach someone who cannot see the Output & keying section. */
+  .obsalert{padding:10px 16px;background:#3a0f0c;border-top:1px solid #7d241c;color:#ffd9d4;
+    font-size:12.5px;font-weight:600;line-height:1.45}
+  #console-root.skin-simple .obsalert{background:#fdeceb;border-color:#e8b4ae;color:#8a1c12}
+  .simbtn.feedlive{background:var(--live);border-color:var(--live);color:#fff;font-weight:800}
+  .simbtn.feedoff{background:rgba(48,209,88,.14);border-color:#2c5740;color:var(--ok);font-weight:700}
+  #console-root.skin-simple .simbtn.feedlive{background:#e03127;border-color:#c02017;color:#fff}
+  #console-root.skin-simple .simbtn.feedoff{background:#e6f8ec;border-color:#38b45f;color:#14663a}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:.9em;color:#ffd089}
   .empty{color:var(--faint);font-size:12px;padding:10px 2px;line-height:1.5}
 
@@ -457,14 +471,16 @@
       <button class="simbtn" id="simV2">Verse 2</button>
       <button class="simbtn" id="simName">Sample name</button>
       <button class="simbtn" id="simClear">Clear</button>
-      <button class="simbtn" id="simLive" style="margin-left:auto">Live ProPresenter feed: OFF</button>
+      <button class="simbtn feedoff" id="simLive" style="margin-left:auto">&#9675; ProPresenter feed: OFF</button>
     </div>
-    <!-- Logo / slogan layers. Hidden until a logo element exists. These go straight to air
-         on click — they are the ONLY thing that takes a logo down, by design. -->
+    <!-- Per-layer show/hide, straight to air on click. Hidden until a layer exists. -->
     <div class="simrow logorow" id="logoRow" style="display:none">
       <span class="lbl">Layers</span>
       <span id="logoBtns" class="logobtns"></span>
     </div>
+    <!-- "Why is OBS blank?" answered on the main bar. The relay counts its own SSE
+         subscribers, so this is a fact, not a guess. Shown only when something is wrong. -->
+    <div class="obsalert" id="obsAlert" style="display:none"></div>
   </main>
 </div>
 
@@ -1528,18 +1544,26 @@ function lsGet(k,fb){try{const r=localStorage.getItem(k);return r?deepMerge(fb,J
 // A silent failure here is the worst kind: the operator keeps designing, nothing is
 // ever persisted, and the work is gone on reload. Surface it once (not per keystroke).
 let _lsWarned=false;
+/* Persist a config. A quota failure is NOT fatal and must never stop a Take: the OBS output
+   is driven by the relay broadcast, not by localStorage — that is only the restore-on-reload
+   copy and the fallback path when the relay is unreachable. So this swallows the failure,
+   says so ONCE, and lets the caller carry on putting graphics on air.
+   The alert names the fix that actually works now (link the file instead of embedding it)
+   rather than telling the operator to delete their artwork. */
 function lsSet(k,v){
-  try{ localStorage.setItem(k,JSON.stringify(v)); _lsWarned=false; }
+  try{ localStorage.setItem(k,JSON.stringify(v)); _lsWarned=false; return true; }
   catch(e){
     if(!_lsWarned){
       _lsWarned=true;
       try{ console.error("lower-thirds: could not save — local storage is full",e); }catch(e2){}
       try{ if(typeof alert==="function") alert(
-        "Couldn't save your work — this browser's local storage is full.\n\n"+
-        "The most common cause is an imported image or video embedded in the look. "+
-        "Remove it, or host it and paste the URL instead.\n\n"+
-        "Until then, changes will NOT survive a reload."); }catch(e2){}
+        "This look is too big to SAVE in the app's local storage — but it is still going to air normally.\n\n"+
+        "Cause: an imported image or video is embedded in the look itself.\n\n"+
+        "Fix: open that element's “Background image / video” and use “…or a local file on this PC” "+
+        "(or a web URL) instead of Import. A linked file has no size limit and costs the look nothing.\n\n"+
+        "Until then, the look will not survive restarting the app."); }catch(e2){}
     }
+    return false;
   }
 }
 /* A try/catch around JSON.parse only survives INVALID JSON. Valid JSON of the WRONG SHAPE
@@ -1662,7 +1686,7 @@ function createBus(){
           relayOk=false;
           const code=(r&&r.status)||0;
           statusCb&&statusCb(false,code===413
-            ?"Take failed: the look is too large to send (over 5 MB). Shrink or unlink an imported image."
+            ?"Take failed: the look is too large for the local server. Link a background video as a local file instead of importing it (Background image / video → “…or a local file on this PC”)."
             :("Take failed: the local server answered "+code+"."));
         })
         .catch((e)=>{ relayOk=false;
@@ -3260,8 +3284,16 @@ if(!isOutput){
     // operator skins, which have no host field to fix it with. Refuse and say why.
     if(v && !(preview&&preview.conn&&preview.conn.host)){
       flash($("simLive"),"Set the ProPresenter IP in Builder first"); return; }
-    liveMode=v; $("simLive").classList.toggle("on",v);
-    $("simLive").textContent="Live ProPresenter feed: "+(v?"ON":"OFF");
+    liveMode=v;
+    // RED = live, GREEN = off, per the on-air convention. "on" is removed explicitly: it is
+    // the generic accent style every other simbtn uses, and leaving it set painted the live
+    // state in the same amber as an inert button.
+    const sb=$("simLive");
+    sb.classList.remove("on");
+    sb.classList.toggle("feedlive",v); sb.classList.toggle("feedoff",!v);
+    sb.textContent=(v?"● ProPresenter feed: LIVE":"○ ProPresenter feed: OFF");
+    sb.title=v?"LIVE — the Preview monitor is following ProPresenter. Click to go back to sample mode."
+              :"OFF — Preview is in sample mode and ignores ProPresenter. Program and OBS are unaffected either way. Click to follow the live feed.";
     if(v){ startConsolePP(); } }
   $("simLive").onclick=()=>toggleLive(!liveMode);
 
@@ -4245,17 +4277,15 @@ if(!isOutput){
      save threw QuotaExceeded and reported "local storage is full", which names the wrong
      culprit entirely. Measure what is actually left, against the actual config, before
      committing the import. */
-  const RELAY_MAX=5e6;
-  function mediaBudget(box){
-    // Size the look WITHOUT this element's current media, so replacing a 3 MB video with
-    // another 3 MB video is judged on the space it will actually occupy, not double.
-    const keep=box?box.mediaSrc:"";
-    if(box) box.mediaSrc="";
-    let used=0; try{ used=JSON.stringify(preview).length; }catch(e){ used=0; }
-    if(box) box.mediaSrc=keep;
-    // 64 KB of headroom for the JSON envelope, the _take stamp and the conn block.
-    return Math.max(0,RELAY_MAX-used-65536);
-  }
+  // Matches relay.js CONFIG_MAX. Raised from 5 MB after every Take on a look carrying an
+  // embedded logo + loop answered 413 mid-service and OBS sat blank. Kept in sync by hand;
+  // the two live in different files and there is no build step to share a constant.
+  const RELAY_MAX=512*1024*1024;
+  // Above this, embedding still WORKS but is a bad idea — localStorage (a few MB, browser
+  // enforced) can no longer hold the look, so it goes to air but will not survive a restart.
+  // That is a warning, not a refusal: refusing is what left Brandon unable to use his own
+  // artwork, and the operator is the one who knows whether this look needs to persist.
+  const EMBED_SOFT=4*1024*1024;
   const mb=(n)=>(n/1048576).toFixed(1)+" MB";
   /* OBS-style LOCAL FILE media. A path like C:\Videos\loop.mp4 cannot go into the <video>
      src directly — the output page is http-served, and an http page may not load file://
@@ -4292,33 +4322,32 @@ if(!isOutput){
       // an 8 MB mp4 became an ~11 MB data URI that passed the guard and then failed every
       // Take with a 413 for the rest of the service. GIFs skip the canvas downscaler (it
       // would kill the animation), so they arrive at full size and get the video treatment.
+      // WARN, DO NOT REFUSE. An earlier version rejected anything over the room left in a
+      // 5 MB budget — which is how an operator ended up unable to use his own artwork on a
+      // Sunday morning. The relay ceiling is now 512 MB, so the only real consequence of a
+      // big embed is that localStorage cannot hold the look: it still goes to air, it just
+      // will not survive restarting the app. Say that, offer the linked-file alternative
+      // that has no downside at all, and let the operator decide.
       const isVideo=/^video\//.test(f.type), isGif=/gif$/i.test(f.type);
       const what=isVideo?"video":isGif?"GIF":"image";
-      const budget=mediaBudget(b);
-      const tooBig=(bytes,note)=>{
-        alert("That "+what+" is "+mb(bytes)+" once embedded, and this look has "+mb(budget)+" of room left.\n\n"+
-              note+"\n\nUse “…or a local file on this PC” below instead — a linked local file has no size "+
-              "limit and costs this look nothing. (A hosted web URL works the same way.)");
-        fileInput.value="";
-      };
-      // Stills are downscaled to 1600px first, so judge them on a generous raw allowance and
-      // let the encoded check below be the real gate. Video and GIF are embedded as-is.
-      const rawGuess=(isVideo||isGif)?Math.ceil(f.size*4/3):f.size;
-      if((isVideo||isGif) && rawGuess>budget){
-        tooBig(rawGuess,"Everything on the Take — every layer, every image, every video — has to fit in one 5 MB "+
-                        "message to the output, and this alone is over what is left.");
-        return;
-      }
-      if(f.size>24*1024*1024){   // nothing this large survives the downscaler either
-        tooBig(f.size,"That is larger than this app will read at all.");
-        return;
+      const askEmbed=(bytes)=>confirm(
+        "That "+what+" is about "+mb(bytes)+" once embedded in the look.\n\n"+
+        "It will go to air fine, but a look this size cannot be saved in the app's storage, so it "+
+        "won't survive restarting the app.\n\n"+
+        "Better: Cancel, and use “…or a local file on this PC” just below — a linked file has NO size "+
+        "limit, keeps the look small, and survives restarts.\n\n"+
+        "Embed it anyway?");
+      // Video and GIF embed as-is (base64 costs 4/3); stills are downscaled to 1600px first,
+      // so only the encoded result below is worth judging for them.
+      if((isVideo||isGif) && Math.ceil(f.size*4/3)>EMBED_SOFT && !askEmbed(Math.ceil(f.size*4/3))){ fileInput.value=""; return; }
+      if(f.size>RELAY_MAX){
+        alert("That file is "+mb(f.size)+" — too large for the app to read into memory.\n\n"+
+              "Use “…or a local file on this PC” below: it plays straight off disk at any size.");
+        fileInput.value=""; return;
       }
       importMedia(f,(url,kind)=>{
-        // THE check: the encoded length, against what is actually left. Committing first and
-        // discovering the overflow at Take is how this failed before.
-        if(String(url||"").length>budget){ tooBig(String(url||"").length,
-          "Everything on the Take — every layer, every image, every video — has to fit in one 5 MB "+
-          "message to the output."); return; }
+        const bytes=String(url||"").length;
+        if(!(isVideo||isGif) && bytes>EMBED_SOFT && !askEmbed(bytes)){ fileInput.value=""; return; }
         b.mediaSrc=url; b.mediaType=kind; b.mediaLocal=""; onCh(); renderPanels();
       },(msg)=>{ alert(msg); fileInput.value=""; }); };
     const rows=[
@@ -5072,7 +5101,24 @@ if(!isOutput){
     obsPoll=setInterval(tick,2000);
     setTimeout(tick,0);            // after the group is appended
   }
+  /* The single fact that answers "why is OBS blank?", hoisted out of the collapsed
+     Output & keying panel and onto the main bar. The relay COUNTS its SSE subscribers, so
+     it knows for certain whether an output is attached — but on the morning that mattered
+     that answer was three clicks deep inside a closed <details>, and the operator was left
+     guessing between ProPresenter, the app and OBS. It only appears when something is
+     wrong, so it costs nothing on a normal Sunday. */
+  function paintObsAlert(s){
+    const bar=$("obsAlert"); if(!bar) return;
+    let msg="";
+    if(!SERVED) msg="FILE MODE — this page was opened from disk, so OBS cannot receive anything. Launch the desktop app instead.";
+    else if(!s) msg="RELAY NOT ANSWERING — the built-in server is down. Close the app completely and reopen it.";
+    else if(!s.clients) msg="NOTHING IS LISTENING — no OBS Browser Source is connected, so nothing you take can reach air. In OBS: add a Browser source at "+relayBase()+"/output (1920×1080), or right-click the existing one → Refresh.";
+    else if(!s.hasProgram) msg="OBS IS CONNECTED BUT HAS NO LOOK YET — press TAKE TO AIR to send one.";
+    bar.textContent=msg;
+    bar.style.display=msg?"":"none";
+  }
   function paintObsStatus(s,node){
+    paintObsAlert(s);
     const n=node||$("obsStat"); if(!n)return;
     n.innerHTML="";
     const lamp=(c)=>el("span",{style:"width:11px;height:11px;border-radius:50%;flex:0 0 auto;background:"+c+";box-shadow:0 0 10px "+c});
