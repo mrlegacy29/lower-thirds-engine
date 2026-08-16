@@ -1778,6 +1778,24 @@ function isFullClear(rule, layer, signals){
     default:       return signals.allOff===true;                  // every visual layer off
   }
 }
+/* THE SCRIPTURE REFERENCE LIST HAS ITS OWN RULE, DELIBERATELY NOT isFullClear().
+   The list is a running record of the whole sermon. Rebuilding it is impossible — the
+   references are gone — so wiping it wrongly is destructive and irreversible, while keeping
+   it wrongly costs one click on the operator's own "Clear list" button. Those two mistakes
+   are not equally bad, so the tie must not be broken by a guess.
+   isFullClear("all") answers "is every layer off?", and on a rig running scripture with no
+   background layer that is TRUE for Clear Slide as well — which is why Brandon's F2 kept
+   destroying his list. This asks the stricter question: do we have POSITIVE evidence this
+   was Clear All? Only an all-off reading we can attribute (something else was on screen and
+   went down with the slide) counts. Ambiguous clears leave the list alone; the operator's
+   own control ends the session deterministically.
+   The other rules are honoured as chosen: "pres"/"layer" are explicit operator picks about
+   which signal to trust, and "manual" already means "never auto-clear". */
+function isListClear(rule, layer, signals){
+  if(!signals) return false;
+  if(rule==="all"||!rule) return signals.allOffSure===true;
+  return isFullClear(rule, layer, signals);
+}
 /* ProPresenter's presentation payload nests slides inside named groups, but the live
    position (/v1/presentation/slide_index) is a FLAT index across the whole deck. Flatten
    once per deck so the index resolves in O(1) instead of walking groups on every poll.
@@ -1839,10 +1857,44 @@ function createPP(opts){
   // "which group is this verse in" instead of only "is something live" — one scripture
   // element per screen position, chosen by the group the operator built in PP.
   let presUid=null, presFlat=[], presSig="", slideGroup="", slideLabel="";
+  /* CAN WE ACTUALLY TELL CLEAR ALL FROM CLEAR SLIDE?
+     Measured on PP 21.2: presentation/active reports null for BOTH, so the only
+     discriminator is the other visual layers. That works when a background/media layer is
+     running — Clear Slide leaves it up, Clear All takes it down — and it is USELESS when the
+     slide is the only thing on screen, because then both keys produce the identical
+     "everything off" reading.
+     That is not a hypothetical: running scripture with no background is exactly how Brandon
+     runs a sermon, and it made every F2 look like an F1 and destroy the reference list he
+     had spent the sermon building. Reproduced on the real output page.
+     So we now say so out loud instead of guessing. This latches true the moment any
+     non-slide visual layer is seen ON, and resets when a fresh live slide starts a new
+     stretch — so at the moment of a clear it answers "was there something else on screen
+     that Clear All would have taken down too?". Only then is an all-off reading POSITIVE
+     evidence of Clear All. */
+  let sawNonSlide=false, prevSlideOn=false;
+  function noteLayerEvidence(map,slideIsOn){
+    if(map && slideIsOn){
+      let other=false;
+      for(const k in map){ if(k==="slide"||k==="slides"||k==="audio") continue; if(map[k]) other=true; }
+      // Reset on the LEADING EDGE of a live stretch, then latch anything that appears during
+      // it — a background that starts a beat after the slide still counts.
+      // prevSlideOn, NOT lastActive: lastActive has already been updated to THIS tick's
+      // reading by the time we get here, so it is true on every live tick and the reset
+      // never fired — evidence from an earlier stretch leaked forward and made a
+      // no-background clear look positively attributable. (Caught by the no-background
+      // regression case below, which is the whole reason this function exists.)
+      if(!prevSlideOn) sawNonSlide=false;
+      if(other) sawNonSlide=true;
+    }
+    prevSlideOn=!!slideIsOn;
+  }
   // A layers payload we don't recognise used to latch layer support off for the
   // whole session on ONE bad read (a {} body, a 200-with-error, a PP hiccup), and
   // clear detection never came back. Require several in a row.
   let unknownLayers=0;
+  // Consecutive layers-endpoint FAILURES (non-ok status, or a thrown/aborted fetch), counted
+  // separately from unrecognised-shape reads — see the degrade-to-text-mode branch in tick().
+  let layerFails=0;
   const UNKNOWN_LAYERS_LIMIT=3;
 
   // No timeout on a fetch means one request that never settles stalls the feed
@@ -1875,11 +1927,25 @@ function createPP(opts){
           if(lr.ok){ const lj=await lr.json(); const a=slideLayerActive(lj);
             if(a===null){ if(++unknownLayers>=UNKNOWN_LAYERS_LIMIT) supportsLayers=false; }
             else { unknownLayers=0; active=a; allClr=allLayersClear(lj); layersMap=normLayers(lj); lastActive=active; lastAllClr=allClr; lastLayers=layersMap; layerOkThisTick=true; } }
-          // a non-ok layers status is transient — do NOT latch supportsLayers off
-        }catch(e){ /* transient layers failure — do NOT latch off; retry next tick */ }
+          else layerFails++;                 // a 404 / 500 / 502 IS a failure, not a shrug
+        }catch(e){ layerFails++; }           // abort (the watchdog above), timeout, socket reset
         if(!running || myGen!==gen) return;
-        // on a transient layers miss, reuse the last good reading instead of flapping
-        if(supportsLayers && !layerOkThisTick){ active=lastActive; allClr=lastAllClr; layersMap=lastLayers; }
+        if(layerOkThisTick) layerFails=0;
+        else if(layerFails>=UNKNOWN_LAYERS_LIMIT){
+          /* A STALE "the slide layer is off" must never keep asserting a clear.
+             Holding the last good reading is right for ONE bad tick, but if the layers
+             endpoint stays down while the held value is `false`, every subsequent poll
+             re-asserts a clear — and now that a clear takes the whole screen down, the OBS
+             output goes blank and STAYS blank while ProPresenter is happily showing a live
+             verse. Nothing recovers it: this branch never touched unknownLayers, so the
+             text-mode fallback was never reached either. Reproduced on the real output page.
+             Degrade to the text-mode reading instead (active===null), where non-empty slide
+             text means live — the same fallback used on a build with no layers API at all. */
+          active=null; allClr=null; layersMap=lastLayers;
+          lastActive=null; lastAllClr=null;
+        }
+        // one bad tick: reuse the last good reading rather than flapping
+        else { active=lastActive; allClr=lastAllClr; layersMap=lastLayers; }
       }
       // presentation/active distinguishes Clear All (presentation cleared -> null) from
       // Clear Slide (slide hidden but the presentation stays active -> populated). Hold last on a blip.
@@ -1949,9 +2015,14 @@ function createPP(opts){
       // clear when layer inactive (preferred) OR no text;  clearAll = every visual layer off (F1)
       const cleared = (active===false) || (active===null && !slideText.trim());
       const clearAll = (allClr===true);
+      noteLayerEvidence(layersMap, active===true);
       // group/label ride along so a look can route by them, and so the console's diagnostic
       // strip can show the operator what the engine is actually seeing.
+      // allOffSure: an all-off reading we can actually ATTRIBUTE to Clear All, because
+      // something besides the slide was on screen a moment ago and went down with it. When
+      // false the two keys are indistinguishable — see sawNonSlide.
       const signals = { layers:layersMap, presPopulated:presPop, allOff:clearAll,
+                        allOffSure: clearAll && sawNonSlide,
                         group:slideGroup, label:slideLabel };
       const sigKey = active+"|"+presPop+"|"+JSON.stringify(layersMap||0);
       // Callback exceptions are contained: a render error must never stop the feed.
@@ -2021,7 +2092,7 @@ function createPP(opts){
     }catch(e){ /* optional enrichment — never let it affect the feed */ }
   }
   return {
-    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;unknownLayers=0;
+    connect(h,p,ms){ this.stop(); host=h;port=p;pollMs=ms||200;running=true;supportsLayers=true;unknownLayers=0;layerFails=0;sawNonSlide=false;prevSlideOn=false;
       lastKey="";lastSigKey="";lastActive=null;lastAllClr=null;lastLayers=null;lastPres=null;
       // A reconnect must re-offer the deck's labels: presSig is what suppresses a repeat
       // fire, and without clearing it a fresh connect to the same deck would leave the
@@ -3054,16 +3125,14 @@ if(isOutput){
     if(!text){
       // fallback must match defaultConfig — "pres" cannot tell the two clears apart at all
       const full=isFullClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
-      // ONLY a full clear empties the list. This used to wipe on EVERY clear, which meant a
-      // Clear Slide (F2) — the normal "take the verse off air between points" keystroke —
-      // left the header up over an EMPTY plate, and every reference built up during the
-      // sermon was gone. F2 now takes the verse off and leaves the running list exactly as
-      // it was; F1 (Clear All) ends the session and takes the list with it. That is also
-      // what the element's own toggle has always said ("Clear this list on ProPresenter
-      // Clear All (F1)") and what the panel hint promised — the code was the odd one out.
-      if(full && histWantsClear()){ history.length=0; stage.setHistory(history); }
-      if(full) everShown=false;                                // a full clear ends the session
-      stage.setHeaderHold(everShown && !full);                 // hold the header on a Clear Slide, hide it on a Clear All
+      // The LIST answers to isListClear, not to `full` — it needs POSITIVE evidence of a
+      // Clear All, because on a rig with no background layer F2 and F1 read identically and
+      // `full` is true for both. Guessing wrong here throws away the whole sermon's
+      // references with no way to get them back. See isListClear.
+      const listClr=isListClear(cn.clearRule||"all", cn.clearLayer||"media", signals);
+      if(listClr && histWantsClear()){ history.length=0; stage.setHistory(history); }
+      if(listClr) everShown=false;                             // only a real Clear All ends the session
+      stage.setHeaderHold(everShown && !listClr);              // the TITLE rides with its list, not with `full`
       // Take the rest of the screen down too. BEFORE setLive so the single render that
       // follows already knows the clear state — otherwise a manual element paints for one
       // frame after the clear, which on a hard cut is a visible flash on air.
@@ -3074,7 +3143,12 @@ if(isOutput){
       // ProPresenter showing something. The slide LAYER is the discriminator: active===false
       // is a real clear, active===null is the no-layers-API text-mode fallback (where empty
       // text IS the only clear signal there is), and active===true is a live blank slide.
-      stage.setCleared(isClear(active)?(full?"all":"slide"):"none");
+      // "all" only on POSITIVE evidence too — clearKind is what decides whether the list
+      // element stays ON AIR, so an ambiguous clear must land on "slide" or the list would
+      // vanish from the screen even though its contents survived. Everything that is NOT a
+      // running list goes off air on either kind, so the screen still blanks on F2 and F1
+      // exactly as before.
+      stage.setCleared(isClear(active)?(listClr?"all":"slide"):"none");
       stage.setLive(null); return;
     }
     // Live slide: everything comes back, and any manual "show it anyway" override from the
@@ -3317,8 +3391,11 @@ if(!isOutput){
     {
       const _pgcn0=(program&&program.conn)||{}, _pvcn0=(preview&&preview.conn)||{};
       if(!text && isClear(active)){
-        pgStage.setCleared(isFullClear(_pgcn0.clearRule||"all",_pgcn0.clearLayer||"media",signals)?"all":"slide");
-        pvStage.setCleared(isFullClear(_pvcn0.clearRule||"all",_pvcn0.clearLayer||"media",signals)?"all":"slide");
+        // isListClear, matching the output page: clearKind is what decides whether the
+        // running lists stay ON AIR, so an ambiguous clear must land on "slide" or the list
+        // disappears from the monitors while its contents are still there.
+        pgStage.setCleared(isListClear(_pgcn0.clearRule||"all",_pgcn0.clearLayer||"media",signals)?"all":"slide");
+        pvStage.setCleared(isListClear(_pvcn0.clearRule||"all",_pvcn0.clearLayer||"media",signals)?"all":"slide");
       } else {
         // A live slide retires the Logo row's manual "show it anyway" override on BOTH
         // configs, so it cannot survive into the next Clear All.
@@ -3337,18 +3414,19 @@ if(!isOutput){
     // longer makes the Program monitor disagree with air.
     const _pgcn=(program&&program.conn)||{}, _pvcn=(preview&&preview.conn)||{};
     if(!text){
-      const _pgFull=isFullClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
-      const _pvFull=isFullClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
-      // Gated on the PROGRAM full-clear for the same reason logEverShown is (below): the
-      // console's list is the twin of the OBS output's, and the output keys off program.conn
-      // alone. See the output-page onSlide for why only a FULL clear may empty it.
+      // The LIST uses isListClear on BOTH sides — the console's list is the twin of the OBS
+      // output's, so if one guesses and the other demands proof they drift apart and the
+      // Program monitor stops matching air. See isListClear for why the list refuses to act
+      // on an ambiguous clear.
+      const _pgFull=isListClear(_pgcn.clearRule||"all",_pgcn.clearLayer||"media",signals);
+      const _pvFull=isListClear(_pvcn.clearRule||"all",_pvcn.clearLayer||"media",signals);
       if(_pgFull && historyWantsClear(program)) clearLog();
       // Reset on the PROGRAM rule alone. logEverShown is the console's twin of the output
       // page's everShown, and the output page keys off program.conn only — so requiring
       // BOTH meant that the moment Preview's clear rule differed from Program's (an
       // un-taken settings change), the Program monitor stopped resetting and permanently
       // disagreed with what OBS was actually doing.
-      if(_pgFull) logEverShown=false;                          // a full clear ends the session
+      if(_pgFull) logEverShown=false;                          // a real Clear All ends the session
       pgStage.setHeaderHold(logEverShown&&!_pgFull); pvStage.setHeaderHold(logEverShown&&!_pvFull);
       // Take the rest of the screen down — see clearGateOk. Each monitor is told the clear
       // its OWN config computes, for the same reason setHeaderHold is: the Program monitor
@@ -3493,6 +3571,17 @@ if(!isOutput){
         title:"This layer is in Preview only. Press TAKE TO AIR to send it to OBS first."});
       b.disabled=true; box.append(b);
     });
+    // END THE SESSION, DETERMINISTICALLY. ProPresenter cannot always tell Clear All from
+    // Clear Slide — with no background layer the two keys report identically — so the list
+    // deliberately refuses to empty on a clear it cannot attribute (see isListClear). This
+    // is the control that always works, and it belongs beside the layers rather than buried
+    // in the Connection panel where it used to be the only copy.
+    if(els.some(e=>e&&e.type==="history")){
+      box.append(el("button",{class:"simbtn",style:"margin-left:auto",
+        text:"Clear scripture list",
+        title:"Empty the Previously Referenced list and drop its title — the end-of-service clear. Takes effect on air immediately.",
+        onclick:()=>{ if(confirm("Clear the scripture reference list?\n\nIt empties on air straight away. The verses already shown are not recoverable.")) manualClearList(); }}));
+    }
   }
   function layerSetVisible(id,on){
     // Applied to BOTH configs. Program alone would leave TAKE reporting phantom pending

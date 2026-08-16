@@ -77,8 +77,13 @@ const pushSSE = (cfg) => { if (sseInst && sseInst.onmessage) sseInst.onmessage({
   // The verse itself must still leave air — "keep the list" must not mean "keep everything".
   ok('F2: the verse is off air', !/Romans 8:28/.test(outRef()));
 
-  // re-populate, then F1 (Clear All): presentation cleared -> list clears AND header hides
-  slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = { slide: true, media: false }; await sleep(400);
+  // re-populate, then F1 (Clear All): list clears AND header hides.
+  // media:TRUE while live is load-bearing now. The list only empties on an all-off reading it
+  // can ATTRIBUTE to Clear All — something besides the slide must have been on screen and
+  // gone down with it. With media:false here, this F1 is indistinguishable from an F2 and the
+  // list correctly survives (that exact case is pinned in clear_screen_test). A background
+  // layer running during the verse is also what a real rig looks like.
+  slideText = 'Psalm 23:1\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = { slide: true, media: true }; await sleep(400);
   ok('output list repopulates', outList().includes('Psalm 23:1'));
   slideText = ''; slideActive = false; presActive = false; layersObj = { slide: false, media: false }; await sleep(700);
   ok('F1: output ref list clears', outList().length === 0);

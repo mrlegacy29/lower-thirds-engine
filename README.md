@@ -112,6 +112,21 @@ live slide hands control back to ProPresenter. Tick **Stay on air through
 ProPresenter clears** on the element (or pick **● Always live** in its Layers
 dropdown) if it should ignore F1/F2 entirely.
 
+### Clearing: F2 vs F1
+
+**F2 / Clear Slide** takes the verse and the rest of the screen off air and
+**always keeps the scripture reference list** — entries and title. **F1 / Clear
+All** ends the session and takes the list with it.
+
+One caveat worth knowing, because it is ProPresenter and not this app:
+ProPresenter reports F1 and F2 *identically* when the slide is the only thing on
+screen — both simply say "everything is off". The list therefore only empties
+when the engine can positively tell it was a Clear All (something else, e.g. a
+background layer, was up and went down with the slide). When it cannot tell, the
+list is kept — losing a sermon's references is not recoverable, keeping them is
+one click. Use **Clear scripture list** in the Layers row to end the session on
+any rig.
+
 ### The Layers row — every layer, one click
 
 The **Layers** row under the monitors gives **every layer** the same

@@ -116,7 +116,17 @@ let pass=0,fail=0; const ok=(n,c)=>{console.log((c?'PASS':'**FAIL**')+'  '+n);c?
 
     click(D.getElementById('simV1')); await sleep(60);
     ok('Sample verse visibly changes the preview', /Psalm 23:1/.test(pvTxt()));
-    ok('...and is NOT the factory placeholder verse', !/John 3:16/.test(pvTxt()));
+    // Scoped to the VERSE elements, excluding the scripture reference list. The list is a
+    // running record and legitimately still holds "John 3:16" as a chip from the live feed
+    // earlier in this suite — it survives clears it cannot attribute to Clear All, which is
+    // the whole point of isListClear. Reading the entire stage made this assertion depend on
+    // the list having been wiped, so it started failing the moment the list stopped being
+    // thrown away on an ambiguous clear. What it MEANS is "the sample verse replaced the
+    // factory placeholder in the scripture element".
+    const verseTxt = () => [...D.querySelectorAll('#pv-scaler .lt-el')]
+      .filter(e => e.style.opacity !== '0' && !e.querySelector('.h-items'))
+      .map(e => e.textContent).join(' ');
+    ok('...and is NOT the factory placeholder verse', !/John 3:16/.test(verseTxt()));
 
     click(D.getElementById('simV2')); await sleep(60);
     ok('Verse 2 swaps the live verse', /Romans 8:28/.test(pvTxt()));

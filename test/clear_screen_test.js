@@ -39,7 +39,7 @@ const path = require('path');
 const html = require('fs').readFileSync(path.join(__dirname, '..', 'lt.html'), 'utf8');
 const { onAirText } = require('./_onair');
 
-let slideText = '', slideActive = true, layersObj = null, presActive = true;
+let slideText = '', slideActive = true, layersObj = null, presActive = true, layersFail = false;
 const errors = [];
 // Captured from the class the page constructs at boot. Installing the capturing stub AFTER
 // the page has already subscribed is too late — it leaves every push() a no-op, which makes
@@ -58,7 +58,10 @@ const dom = new JSDOM(html, {
     w.fetch = (u) => {
       const url = String(u);
       if (/active/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ presentation: presActive ? { id: { uuid: 'x', name: 'Deck', index: 0 } } : null }) });
-      if (/layers/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve(layersObj || { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false }) });
+      if (/layers/.test(url)) {
+        if (layersFail) return Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({}) });
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(layersObj || { slide: false, media: false, props: false, messages: false, announcements: false, audio: false, video_input: false }) });
+      }
       if (/slide/.test(url)) return Promise.resolve({ ok: true, json: () => Promise.resolve({ current: { text: slideText } }) });
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     };
@@ -236,6 +239,86 @@ const allOff = () => ALL_MARKS.filter(m => !onAir(m));
     await sleep(600);
     ok('reference list with auto-clear OFF stays visible through F1', onAir('Acts 2:42'));
     ok('...while the rest of the screen still clears', allOff().length === ALL_MARKS.length);
+  }
+
+
+  /* ---------- F2 WITH NOTHING ELSE ON SCREEN — the rig this was lost on ----------
+     THE regression. Every case above models Clear Slide as {slide:false, media:TRUE}, i.e. a
+     background layer still running, which is the ONLY state where ProPresenter's API can
+     tell the two clears apart. Running scripture with no background — how a sermon is
+     actually run — makes F2 report EXACTLY what F1 reports: every layer off. The engine
+     read that as Clear All and destroyed the reference list mid-sermon, repeatedly, while
+     32 suites stayed green because not one of them modelled it.
+     isListClear now demands POSITIVE evidence before emptying the list: an all-off reading
+     is only attributable to Clear All if something besides the slide was on screen a moment
+     earlier and went down with it. No evidence -> the list is left alone. Wiping it wrongly
+     is irreversible; keeping it wrongly costs one click on the Clear scripture list button. */
+  {
+    const NOBG_LIVE = { slide: true,  media: false, props: false, messages: false, announcements: false, audio: false, video_input: false };
+    push(buildCfg({ _take: ++take })); await sleep(200);
+    slideText = 'John 3:16\nFor God so loved the world.'; slideActive = true; presActive = true; layersObj = NOBG_LIVE;
+    await sleep(400);
+    slideText = 'Romans 8:28\nAnd we know.'; await sleep(400);
+    ok('no-background rig: the list builds up while live', onAir('John 3:16'));
+
+    // F2 here is byte-identical to F1: everything off, nothing to attribute it to.
+    slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
+    await sleep(700);
+    ok('no-background F2: the list SURVIVES', onAir('John 3:16') && onAir('Romans 8:28'));
+    ok('no-background F2: the TITLE survives', /PREVIOUSLY REFERENCED/i.test(air()));
+    ok('no-background F2: the verse still comes off air', !onAir('And we know'));
+    ok('no-background F2: and so does everything else', !onAir(MARKERS.sermonTitle) && !onAir(MARKERS.logo));
+
+    // ...and it keeps surviving across repeated clears, which is what a sermon actually does.
+    for (let i = 0; i < 3; i++) {
+      slideText = 'Psalm 23:' + (i + 1) + '\nThe Lord is my shepherd.'; slideActive = true; presActive = true; layersObj = NOBG_LIVE;
+      await sleep(300);
+      slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
+      await sleep(300);
+    }
+    ok('no-background: the list survives a whole sermon of F2s', onAir('John 3:16') && onAir('Psalm 23:3'));
+
+    // A rig WITH a background layer can still positively identify Clear All, and there the
+    // list must still clear — otherwise this fix would just disable the feature.
+    slideText = 'Acts 2:42\nThey devoted themselves.'; slideActive = true; presActive = true; layersObj = VERSE;
+    await sleep(400);
+    slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
+    await sleep(700);
+    ok('with a background layer, a real Clear All still empties the list', !onAir('John 3:16') && !onAir('Acts 2:42'));
+    ok('...and drops the title', !/PREVIOUSLY REFERENCED/i.test(air()));
+  }
+
+  /* ---------- A DEAD LAYERS ENDPOINT MUST NOT LATCH THE SCREEN BLANK ----------
+     Found by an adversarial audit and reproduced on the real output page. On a transient
+     layers miss the poller reuses the LAST GOOD reading — right for one bad tick. But if the
+     last good reading was "slide layer off" (i.e. any clear, which happens constantly) and
+     the endpoint then stays down, every subsequent poll re-asserts that clear. Now that a
+     clear takes the whole screen down, OBS goes blank and STAYS blank while ProPresenter is
+     showing a live verse, and nothing recovers it short of reloading /output — the failure
+     path never touched unknownLayers, so the text-mode fallback was never reached either.
+     After N consecutive FAILURES the poller degrades to the text-mode reading instead
+     (active===null: non-empty slide text means live), the same fallback used on a
+     ProPresenter build with no layers API at all. */
+  {
+    push(buildCfg({ _take: ++take })); await sleep(200);
+    layersFail = false;
+    slideText = 'Mark 1:1\nThe beginning of the gospel.'; slideActive = true; presActive = true; layersObj = VERSE;
+    await sleep(400);
+    // a clear, so the last good layers reading is "slide off"
+    slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
+    await sleep(500);
+    ok('latch: the screen is blank right after the clear (as designed)', !onAir(MARKERS.sermonTitle));
+    // ProPresenter comes back with a live verse, but the layers endpoint is now down
+    layersFail = true;
+    slideText = 'Luke 4:18\nThe Spirit of the Lord is upon me.'; slideActive = true; presActive = true; layersObj = VERSE;
+    await sleep(900);
+    ok('latch: a live verse still reaches air with the layers endpoint down', onAir('The Spirit of the Lord'));
+    ok('latch: ...and so does the rest of the screen', allOff().length === 0);
+    slideText = 'Luke 4:19\nTo proclaim the year of the Lord.'; await sleep(500);
+    ok('latch: advancing slides keeps working', onAir('To proclaim the year'));
+    layersFail = false;
+    await sleep(400);
+    ok('latch: and it recovers cleanly when the endpoint returns', onAir('To proclaim the year'));
   }
 
   console.log('CLEAR-SCREEN RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));
