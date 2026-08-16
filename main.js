@@ -221,6 +221,35 @@ function setClearListKey(accel) {
 }
 ipcMain.handle("clearkey:set", (_e, accel) => setClearListKey(accel));
 ipcMain.handle("clearkey:get", () => ({ key: clearListKey, registered: !!clearListKey }));
+
+/* ---------------- Clear All (F1), driven FROM the app ----------------
+   Settled against ProPresenter's own OpenAPI spec: /v1/status/layers returns seven booleans
+   and nothing else, and there is no endpoint that reports WHICH clear was triggered. With
+   only the slide on screen — a sermon with no background, which is how this rig runs — F1
+   and F2 leave byte-identical state. Detecting F1 by watching ProPresenter is not hard, it
+   is impossible, and three releases were spent proving it.
+   So invert the direction: the app OWNS the key and tells ProPresenter to clear. Pressing F1
+   now means exactly one thing, and ProPresenter still clears because the renderer forwards
+   GET /v1/clear/layer/{layer} for every layer — the documented way to do it. Engine,
+   ProPresenter and OBS end up in the same state by construction instead of by inference. */
+let clearAllKey = null;
+function setClearAllKey(accel) {
+  const next = (typeof accel === "string" && accel.trim()) ? accel.trim() : null;
+  if (clearAllKey && clearAllKey !== next) {
+    try { globalShortcut.unregister(clearAllKey); } catch (e) {}
+    clearAllKey = null;
+  }
+  if (!next) return { ok: true, key: null, registered: false };
+  if (clearAllKey === next) return { ok: true, key: next, registered: true };
+  let registered = false;
+  try { registered = globalShortcut.register(next, () => {
+    if (win && !win.isDestroyed()) win.webContents.send("lt:clear-all");
+  }); } catch (e) { registered = false; }
+  clearAllKey = registered ? next : null;
+  return { ok: registered, key: next, registered };
+}
+ipcMain.handle("clearallkey:set", (_e, accel) => setClearAllKey(accel));
+ipcMain.handle("clearallkey:get", () => ({ key: clearAllKey, registered: !!clearAllKey }));
 // Windows keeps system-wide hotkeys alive past quit unless they are released.
 app.on("will-quit", () => { try { globalShortcut.unregisterAll(); } catch (e) {} });
 

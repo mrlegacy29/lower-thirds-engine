@@ -191,6 +191,53 @@ function bigLook(mb) {
     try { dom.window.close(); } catch (e) {}
   }
 
+  /* ---- Clear All, owned by the app ----
+     MEASURED on a real ProPresenter 21.2 (2026-08-16): triggering Clear Slide and Clear All
+     through the API and sampling every status endpoint gives byte-identical results —
+     layers all false and presentation absent for BOTH. No app can tell the two keys apart by
+     watching, so F1 is a key the APP owns: it empties the running list here and forwards the
+     clear to ProPresenter as GET /v1/clear/layer/{layer} for every layer, the documented
+     call. That forwarding is the whole mechanism, so it gets asserted. */
+  {
+    const { JSDOM } = require('jsdom');
+    const html = require('fs').readFileSync(path.join(__dirname, '..', 'lt.html'), 'utf8');
+    const hits = [];
+    const dom = new JSDOM(html, {
+      url: 'http://localhost:7777/', runScripts: 'dangerously', pretendToBeVisual: true,
+      beforeParse(w) {
+        w.ResizeObserver = class { observe() {} };
+        w.EventSource = class { constructor() { setTimeout(() => this.onopen && this.onopen(), 5); } close() {} };
+        w.requestAnimationFrame = (c) => setTimeout(c, 0);
+        w.confirm = () => true; w.alert = () => {};
+        w.Element.prototype.animate = function () { return { cancel() {}, finished: Promise.resolve() }; };
+        w.fetch = (u) => {
+          const url = String(u);
+          const m = /clear%2Flayer%2F(\w+)|clear\/layer\/(\w+)/.exec(url);
+          if (m) hits.push(m[1] || m[2]);
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        };
+        w.console.error = () => {}; w.onerror = () => {};
+      }
+    });
+    const W = dom.window, D = W.document;
+    await new Promise(r => setTimeout(r, 700));
+    // give it a ProPresenter to talk to
+    const ip = D.querySelector('input[placeholder="192.168.1.100"]');
+    if (ip) { ip.value = '192.168.1.95'; ip.dispatchEvent(new W.Event('input', { bubbles: true })); }
+    await new Promise(r => setTimeout(r, 200));
+    hits.length = 0;
+
+    ok('the app exposes a Clear All handler', typeof W.ltClearAll === 'function');
+    W.ltClearAll();   // exactly what the global shortcut calls
+    await new Promise(r => setTimeout(r, 500));
+
+    const LAYERS = ['slide', 'media', 'props', 'messages', 'announcements', 'audio', 'video_input'];
+    const missing = LAYERS.filter(l => hits.indexOf(l) < 0);
+    ok('Clear All forwards a clear for EVERY ProPresenter layer: ' + (missing.length ? 'missing ' + missing.join(',') : 'all 7'),
+       missing.length === 0);
+    try { dom.window.close(); } catch (e) {}
+  }
+
   console.log('BIG-LOOK RESULT  pass=' + pass + '  fail=' + fail);
   process.exit(fail ? 1 : 0);
 })().catch((e) => {

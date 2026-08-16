@@ -1802,11 +1802,20 @@ function isListClear(rule, layer, signals, ambig){
           the layer rules below are blind in exactly that case. */
     if(signals.presTells===true) return signals.presPopulated===false;
     if(signals.allOffSure===true) return true;          // 2. positively a Clear All
-    // AMBIGUOUS: every layer off with nothing to attribute it to. F1 and F2 are identical
-    // here and no rule can separate them, so the operator picks which way it falls
-    // (Connection -> "When F1 and F2 look identical"). Default "all": Brandon asked for the
-    // list to go on F1, and the dedicated clear key is what gives him an F2-safe clear.
-    return (ambig!=="keep") && signals.allOff===true;
+    /* AMBIGUOUS: every layer off, with nothing to attribute it to.
+       MEASURED on the real rig (2026-08-16, PP 21.2 at 192.168.1.95) by triggering each
+       clear through the API and sampling every status endpoint:
+                        slide   media   props   msgs   ann   audio   vid_in   presentation
+         verse live     true    false   false   false  false false   false    present
+         after F2       false   false   false   false  false false   false    ABSENT
+         after F1       false   false   false   false  false false   false    ABSENT
+       Identical in every field. There is no signal to read, so this is not a detection
+       problem that better code solves — which is why F1 is now a key the APP owns and
+       forwards to ProPresenter (see doClearAll). Given that, an ambiguous clear is a Clear
+       SLIDE by definition, and the list stays: F1 no longer needs to be inferred at all.
+       The operator can still flip this if they run a rig where the two DO differ and would
+       rather not give up the key. */
+    return (ambig==="all") && signals.allOff===true;
   }
   return isFullClear(rule, layer, signals);
 }
@@ -2474,9 +2483,15 @@ function makeElRenderer(){
       // resolves to "" would still count as present and paint an empty label.
       const hd=(subVars(d.content||{}).heading)||"";
       lab.textContent=hd;
-      // Hide the heading when the list is empty/cleared so there's no floating label on air.
-      // In the interactive builder, keep it visible so the element stays selectable/positionable.
-      lab.style.display=(hd && d.showHeading!==false && (items.length>0 || interactive || (data&&data.headerHold)))?"block":"none";
+      /* Hide the heading until the list has something to head.
+         `|| interactive` used to keep it up in the builder so the element stayed easy to
+         grab — but that made the PREVIEW monitor disagree with Program and with OBS from the
+         moment the app opened: "Previously Referenced" sat there before a single scripture
+         had been shown, which reads as the title being stuck on air. Preview must show what
+         air shows. The element itself still stays on screen in the builder (contentFor keeps
+         it for `interactive`), so it is just as easy to position — only the label follows the
+         same rule everywhere. */
+      lab.style.display=(hd && d.showHeading!==false && (items.length>0 || (data&&data.headerHold)))?"block":"none";
       typeCss(lab,st.heading);
       renderHistChips(d,items);
     } else if(t==="qr"){
@@ -3382,6 +3397,38 @@ if(!isOutput){
   const LS_CLEARKEY="pplt.clearkey.v1";
   const CLEARKEY_DEF={key:"F5",on:true};
   function clearKeyCfg(){ const c=lsGet(LS_CLEARKEY,CLEARKEY_DEF); return {key:c.key||"F5",on:c.on!==false}; }
+  const LS_CLEARALLKEY="pplt.clearallkey.v1";
+  const CLEARALLKEY_DEF={key:"F1",on:true};
+  function clearAllKeyCfg(){ const c=lsGet(LS_CLEARALLKEY,CLEARALLKEY_DEF); return {key:c.key||"F1",on:c.on!==false}; }
+  let _clearAllKeyState={registered:false,conflict:false};
+  function applyClearAllKey(){
+    const d=window.ltDesktop; if(!d||!d.clearAllKey) return;
+    const c=clearAllKeyCfg();
+    Promise.resolve(d.clearAllKey.set(c.on?c.key:null)).then(r=>{
+      _clearAllKeyState={registered:!!(r&&r.registered),conflict:!!(c.on&&r&&!r.registered)};
+      const n=$("clearAllKeyStat"); if(n) paintClearAllKeyStat(n);
+    }).catch(()=>{});
+  }
+  function paintClearAllKeyStat(n){
+    const c=clearAllKeyCfg();
+    if(!c.on){ n.textContent="off — ProPresenter keeps F1"; n.style.color="var(--faint)"; return; }
+    if(_clearAllKeyState.conflict){ n.textContent="✕ "+c.key+" is taken by another app"; n.style.color="var(--live)"; return; }
+    if(_clearAllKeyState.registered){ n.textContent="● "+c.key+" armed"; n.style.color="var(--ok)"; return; }
+    n.textContent="…"; n.style.color="var(--faint)";
+  }
+  function clearAllKeyRow(){
+    if(!(window.ltDesktop&&window.ltDesktop.clearAllKey))
+      return el("p",{class:"hint",text:"Available in the desktop app only."});
+    const c=clearAllKeyCfg();
+    const KEYS=["F1","F8","F9","F10","F11","F12","CommandOrControl+F1","CommandOrControl+Shift+X"];
+    const stat=el("b",{id:"clearAllKeyStat",style:"font-family:var(--mono);font-size:11px"});
+    setTimeout(()=>{ try{ paintClearAllKeyStat(stat); }catch(e){} },0);
+    return el("div",null,[
+      rowToggle("Let the app own Clear All",c.on,(v)=>{ lsSet(LS_CLEARALLKEY,{key:clearAllKeyCfg().key,on:v}); applyClearAllKey(); renderPanels(); }),
+      c.on?rowSelect("Key",c.key,KEYS.map(k=>[k,k]),(v)=>{ lsSet(LS_CLEARALLKEY,{key:v,on:true}); applyClearAllKey(); renderPanels(); }):null,
+      el("div",{class:"row",style:"justify-content:space-between"},[el("span",{class:"fld",text:"Status"}),stat])
+    ]);
+  }
   let _clearKeyState={registered:false,conflict:false};
   function applyClearKey(){
     const d=window.ltDesktop; if(!d||!d.clearKey) return;
@@ -3482,6 +3529,38 @@ if(!isOutput){
   if(window.ltDesktop&&window.ltDesktop.clearKey){
     try{ window.ltDesktop.clearKey.onFire(()=>{ manualClearList(); flashClearKey(); }); }catch(e){}
     applyClearKey();
+  }
+  /* CLEAR ALL, initiated here rather than detected.
+     Confirmed against ProPresenter's OpenAPI spec: /v1/status/layers is seven booleans and
+     nothing reports which clear was pressed, so with only the slide up F1 and F2 are
+     indistinguishable. The app therefore takes the key and drives ProPresenter itself:
+     every layer is cleared through the documented GET /v1/clear/layer/{layer}, and the
+     running list is emptied here. ProPresenter, the engine and OBS all end up in the same
+     state because one actor put them there. */
+  const PP_LAYERS=["slide","media","props","messages","announcements","audio","video_input"];
+  function ppClearAll(){
+    const c=(preview&&preview.conn)||{};
+    if(!c.host) return Promise.resolve(false);
+    return Promise.all(PP_LAYERS.map(l=>
+      fetch(ppUrl(c.host,c.port,"/v1/clear/layer/"+l),{cache:"no-store"}).catch(()=>null)
+    )).then(rs=>rs.some(r=>r&&r.ok)).catch(()=>false);
+  }
+  function doClearAll(){
+    // Empty the list FIRST so it cannot be re-logged by the verse still on screen during the
+    // round trip; the layer clears then take the rest of the screen down through the normal
+    // poll, exactly as a hand-pressed F1 would.
+    manualClearList();
+    ppClearAll().then(ok=>{
+      const b=$("btnTrans");
+      if(!ok && b) flash(b,"Cleared here — ProPresenter did not answer");
+    });
+  }
+  // Exposed so the behaviour can be exercised without a global hotkey — the forwarding to
+  // ProPresenter IS the mechanism that makes F1 exact, so it has to be testable.
+  try{ window.ltClearAll=doClearAll; window.ltClearList=manualClearList; }catch(e){}
+  if(window.ltDesktop&&window.ltDesktop.clearAllKey){
+    try{ window.ltDesktop.clearAllKey.onFire(doClearAll); }catch(e){}
+    applyClearAllKey();
   }
   // Visible acknowledgement on the console, so a press that landed is distinguishable from
   // one that did not — the operator is watching ProPresenter, so they check afterwards.
@@ -5080,7 +5159,11 @@ if(!isOutput){
           ? "The list will empty on <b>F1 — and on F2 as well</b>, because on this rig ProPresenter reports them identically. Use the dedicated key below if you want F2 to keep the list."
           : "The list survives a clear the app cannot attribute, so <b>F2 never destroys it</b> — and <b>F1 will not empty it either</b>. Use the dedicated key below to end the session."}),
 
-        el("div",{class:"gh",text:"Dedicated clear key"}),
+        el("div",{class:"gh",text:"Clear All (F1)"}),
+        clearAllKeyRow(),
+        el("p",{class:"hint",html:"ProPresenter's API reports only seven layer booleans and never says <i>which</i> clear you pressed — so with just a slide on screen, F1 and F2 look identical to any app watching. With this on, the app takes F1 and does the clearing itself: it empties the scripture list here and tells ProPresenter to clear every layer (its documented <i>clear layer</i> call), so ProPresenter, this engine and OBS all end up in the same state. Turn it off to hand F1 back to ProPresenter."}),
+
+        el("div",{class:"gh",text:"Clear scripture list (F5)"}),
         clearKeyRow(),
         el("p",{class:"hint",html:"A key the APP watches directly, so it is exact — no guessing from ProPresenter. It works while ProPresenter has focus, and clears the list, its title and the event list immediately on air. <b>F5</b> is ProPresenter's <i>Clear Audio</i>; if you never use the audio layer that key is free, and this takes it over. Desktop app only."})
       ])

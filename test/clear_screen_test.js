@@ -280,11 +280,16 @@ const allOff = () => ALL_MARKS.filter(m => !onAir(m));
     // F2 here is byte-identical to F1: everything off, nothing to attribute it to.
     slideText = ''; slideActive = false; presActive = false; layersObj = ALL_OFF;
     await sleep(700);
-    // presActive=false above means this rig gives the app NOTHING to separate the keys with,
-    // so it falls back to the operator's ambiguity setting (default: treat as Clear All).
-    // The rig that actually distinguishes them is covered by the "F2 keeps the deck active"
-    // block below, which is Brandon's real setup.
-    ok('no-background + no presentation signal: falls back to the ambiguity default', !onAir('John 3:16'));
+    /* presActive=false here reproduces what a REAL ProPresenter does, measured 2026-08-16 by
+       triggering each clear through the API and sampling every status endpoint: F1 and F2
+       leave byte-identical state, presentation absent for both. The app therefore cannot
+       attribute this clear — and an unattributable clear is a Clear SLIDE, so the list must
+       SURVIVE. F1 is owned by the app's own key instead of being inferred (see doClearAll),
+       which is what makes that safe. */
+    ok('unattributable clear: the list survives (it is a Clear Slide by definition)', onAir('John 3:16'));
+    ok('unattributable clear: its title survives too', /PREVIOUSLY REFERENCED/i.test(air()));
+    ok('unattributable clear: the rest of the screen still goes',
+       !onAir(MARKERS.sermonTitle) && !onAir(MARKERS.logo));
 
 
     // A rig WITH a background layer can still positively identify Clear All, and there the
@@ -407,6 +412,27 @@ const allOff = () => ALL_MARKS.filter(m => !onAir(m));
       ok('rig F5: the list resumes logging on the next verse', listChips().indexOf('Titus 2:11') >= 0);
       ok('rig F5: ...and the title comes back with it', /PREVIOUSLY REFERENCED/i.test(air()));
     }
+  }
+
+  /* ---------- the TITLE stays hidden until the first scripture ----------
+     A fresh service: the app is open, ProPresenter is connected, songs may already have been
+     up — but nothing has been REFERENCED yet, so "Previously Referenced" must not be on air.
+     It only appears with the first verse, and it must behave the same on the builder Preview
+     as it does on air (the builder used to force it visible, so the operator saw the title
+     sitting there from launch and reasonably read that as broken). */
+  {
+    push(buildCfg({ _take: ++take, _clearHist: 9100 })); await sleep(300);
+    slideText = ''; slideActive = false; presActive = true; layersObj = ALL_OFF; await sleep(400);
+    ok('title: hidden before anything has been referenced', !/PREVIOUSLY REFERENCED/i.test(air()));
+    // a SONG goes live — still no scripture, so still no title
+    slideText = 'Great is thy faithfulness\nMorning by morning new mercies I see';
+    slideActive = true; layersObj = VERSE; await sleep(450);
+    ok('title: a song lyric does not raise it', !/PREVIOUSLY REFERENCED/i.test(air()));
+    ok('title: ...and no chips appear for it', listChips().length === 0);
+    // first real scripture
+    slideText = 'Hebrews 4:12\nThe word of God is living and active.'; await sleep(450);
+    ok('title: appears with the first scripture', /PREVIOUSLY REFERENCED/i.test(air()));
+    ok('title: ...alongside its first entry', listChips().indexOf('Hebrews 4:12') >= 0);
   }
 
   console.log('CLEAR-SCREEN RESULT  pass=' + pass + '  fail=' + fail + '  ERRORS=' + (errors.length ? JSON.stringify(errors.slice(0, 6)) : 'NONE'));

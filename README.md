@@ -112,24 +112,24 @@ live slide hands control back to ProPresenter. Tick **Stay on air through
 ProPresenter clears** on the element (or pick **● Always live** in its Layers
 dropdown) if it should ignore F1/F2 entirely.
 
-### Clearing: F1, F2 and a key of your own
+### Clearing: F1, F2 and F5
 
-| Key | ProPresenter | What the engine does |
-|---|---|---|
-| **F1** | Clear All | Everything off air — the scripture list and its title included. Ends the session. |
-| **F2** | Clear Slide | Everything off air **except** the scripture reference list and event list, which keep their entries and title. |
-| **F5** | Clear Audio (unused) | **Clears the scripture list and its title on demand**, from anywhere — even while ProPresenter has focus. |
+| Key | What happens |
+|---|---|
+| **F1** | Everything off air — scripture list and title included. The app owns this key and clears ProPresenter itself. |
+| **F2** | Everything off air **except** the scripture reference list and event list, which keep their entries and title. |
+| **F5** | Clears the scripture list and its title on demand, from anywhere. |
 
-F1 and F2 are told apart by whether ProPresenter still reports the deck as
-active: Clear Slide leaves it active, Clear All clears it. The app **learns**
-that the first time it watches a live slide go off with the deck still up, so it
-adapts to your rig instead of assuming. If your ProPresenter genuinely reports
-the two identically, the Connection panel says so — use F5, and
-*Connection → Teach the app your clear keys* will measure it for you.
+**Why the app owns F1.** Measured against a live ProPresenter 21.2: triggering
+Clear Slide and Clear All produces *byte-identical* status — all seven layer
+booleans false and the presentation absent for both. Nothing in the API reports
+which clear was pressed, so no app can tell them apart by watching. Instead the
+app takes F1 and does the work: it empties the list here and tells ProPresenter
+to clear every layer (its documented  call), so ProPresenter, this
+engine and OBS all end up in the same state.
 
-F5 is configurable (or can be turned off) under **Connection → Dedicated clear
-key**. It takes the key over system-wide, so ProPresenter stops receiving it —
-fine if you never use the audio layer.
+Both keys are configurable, or can be handed back to ProPresenter, under
+**Connection → Clear behavior**.
 
 ### The Layers row — every layer, one click
 

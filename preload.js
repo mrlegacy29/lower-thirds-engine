@@ -25,6 +25,13 @@ contextBridge.exposeInMainWorld("ltDesktop", {
     get: () => ipcRenderer.invoke("clearkey:get"),
     onFire: (cb) => ipcRenderer.on("lt:clear-list", () => { try { cb(); } catch (e) {} }),
   },
+  // Clear All. The app owns the key and forwards the clear to ProPresenter, because
+  // ProPresenter's API cannot report which clear was pressed — see main.js.
+  clearAllKey: {
+    set: (accel) => ipcRenderer.invoke("clearallkey:set", accel),
+    get: () => ipcRenderer.invoke("clearallkey:get"),
+    onFire: (cb) => ipcRenderer.on("lt:clear-all", () => { try { cb(); } catch (e) {} }),
+  },
 
   // DeckLink fill + key. Present only in the desktop app — lt.html feature-detects
   // this, so the same file still runs in a plain browser and in OBS.
